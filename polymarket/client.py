@@ -51,6 +51,7 @@ class TraderProfile:
 class PolymarketClient:
     def __init__(self, session: aiohttp.ClientSession):
         self._s = session
+        self._market_status_cache: dict[str, bool] = {}  # market_id -> is_active
 
     async def _get(self, url: str, params: dict | None = None) -> Any:
         try:
@@ -60,6 +61,27 @@ class PolymarketClient:
         except Exception as exc:
             logger.debug("GET %s failed: %s", url, exc)
             return None
+
+    async def is_market_active(self, market_id: str) -> bool:
+        """Returns True only if the market is still open and unresolved."""
+        if not market_id:
+            return True
+        if market_id in self._market_status_cache:
+            return self._market_status_cache[market_id]
+        data = await self._get(f"{GAMMA_API}/markets", params={"id": market_id})
+        if not data:
+            data = await self._get(f"{GAMMA_API}/markets/{market_id}")
+        market = None
+        if isinstance(data, list) and data:
+            market = data[0]
+        elif isinstance(data, dict) and "id" in data:
+            market = data
+        if market is None:
+            return True
+        closed = market.get("closed", False) or market.get("resolved", False)
+        active = not closed
+        self._market_status_cache[market_id] = active
+        return active
 
     async def resolve_username(self, username: str) -> str | None:
         data = await self._get(f"{GAMMA_API}/users", params={"username": username})

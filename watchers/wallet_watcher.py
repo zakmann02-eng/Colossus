@@ -119,6 +119,9 @@ class WalletWatcher:
             new_trades = [t for t in trades if t.id not in self._seen_ids[addr]]
             for trade in new_trades:
                 self._seen_ids[addr].add(trade.id)
+                if not await self._client.is_market_active(trade.market_id):
+                    logger.info("Market '%s' is resolved — skipping alert", trade.market_name)
+                    continue
                 profile = self._profiles.get(addr, TraderProfile(wallet=addr))
                 score, rec = _score_trade(trade, profile, self._copy_min_win_rate, self._copy_min_volume)
                 if score < 75:
