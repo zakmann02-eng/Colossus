@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Callable, Awaitable
 
 from polymarket.client import PolymarketClient, Trade, Position, TraderProfile
@@ -161,6 +162,13 @@ class WalletWatcher:
 
             for trade in new_trades:
                 self._seen_ids[addr].add(trade.id)
+
+                # Skip trades not from today (UTC)
+                today = datetime.now(timezone.utc).date()
+                trade_date = datetime.fromtimestamp(trade.timestamp, tz=timezone.utc).date()
+                if trade_date < today:
+                    logger.info("Trade from %s — not today, skipping", trade_date)
+                    continue
 
                 if not await self._client.is_market_active(trade.market_id):
                     logger.info("Market '%s' is resolved — skipping", trade.market_name)
