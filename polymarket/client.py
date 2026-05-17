@@ -62,6 +62,54 @@ class PolymarketClient:
             logger.debug("GET %s failed: %s", url, exc)
             return None
 
+    async def is_market_us_accessible(self, market_id: str) -> bool:
+        """Returns True if the market is not restricted for US users."""
+        if not market_id:
+            return True
+        cache_key = f"us:{market_id}"
+        if cache_key in self._market_status_cache:
+            return self._market_status_cache[cache_key]
+
+        data = await self._get(f"{GAMMA_API}/markets", params={"id": market_id})
+        if not data:
+            data = await self._get(f"{GAMMA_API}/markets/{market_id}")
+        market = None
+        if isinstance(data, list) and data:
+            market = data[0]
+        elif isinstance(data, dict) and "id" in data:
+            market = data
+
+        if market is None:
+            self._market_status_cache[cache_key] = True
+            return True
+
+        # Explicit US restriction flag
+        if market.get("restricted") or market.get("umaResolutionStatus") == "restricted":
+            self._market_status_cache[cache_key] = False
+            return False
+
+        # Block markets by restricted category or tags
+        _BLOCKED_KEYWORDS = {
+            "us politics", "us elections", "us election", "us political",
+            "united states politics", "american politics",
+            "us congress", "us senate", "us house", "us president",
+            "trump", "harris", "biden", "2024 election", "2026 election",
+        }
+        category = (market.get("category") or "").lower()
+        tags = [t.lower() if isinstance(t, str) else (t.get("label") or t.get("name") or "").lower()
+                for t in (market.get("tags") or [])]
+        title = (market.get("question") or market.get("title") or "").lower()
+
+        combined = f"{category} {' '.join(tags)} {title}"
+        for kw in _BLOCKED_KEYWORDS:
+            if kw in combined:
+                logger.info("Market blocked for US: '%s' (matched '%s')", market.get("question", market_id), kw)
+                self._market_status_cache[cache_key] = False
+                return False
+
+        self._market_status_cache[cache_key] = True
+        return True
+
     async def is_market_active(self, market_id: str) -> bool:
         """Returns True only if the market is still open and unresolved."""
         if not market_id:

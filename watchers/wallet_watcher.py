@@ -174,6 +174,10 @@ class WalletWatcher:
                     logger.info("Market '%s' is resolved — skipping", trade.market_name)
                     continue
 
+                if not await self._client.is_market_us_accessible(trade.market_id):
+                    logger.info("Market '%s' is US-restricted — skipping", trade.market_name)
+                    continue
+
                 profile = self._profiles.get(addr, TraderProfile(wallet=addr))
                 label = self._labels.get(addr, addr[:8])
                 pkey = _position_key(trade.market_id, trade.outcome)
