@@ -121,6 +121,9 @@ class WalletWatcher:
                 self._seen_ids[addr].add(trade.id)
                 profile = self._profiles.get(addr, TraderProfile(wallet=addr))
                 score, rec = _score_trade(trade, profile, self._copy_min_win_rate, self._copy_min_volume)
+                if score < 75:
+                    logger.info("Trade scored %d/100 — below threshold, skipping alert", score)
+                    continue
                 label = self._labels.get(addr, addr[:8])
                 msg = _format_trade_alert(trade, label, profile, score, rec)
                 if self._alert_cb:
