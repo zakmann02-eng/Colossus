@@ -59,7 +59,7 @@ class TelegramNotifier:
             lines.append(f"  • `{label}` — `{addr}`")
         lines += [
             "",
-            "You'll get an alert on every new trade with a copy-trade recommendation.",
+            "You'll get an alert on every new trade with a recommendation.",
             "Type /positions in Telegram to see open positions (manual — just re-run with --positions flag).",
         ]
         await self._dispatch("\n".join(lines))

@@ -34,11 +34,11 @@ def _score_trade(trade: Trade, profile: TraderProfile, copy_min_win_rate: float,
     score = max(0, min(100, score))
 
     if score >= 75 and profile.win_rate >= copy_min_win_rate and profile.total_volume >= copy_min_volume:
-        rec = "🟢 STRONG BUY — copy this trade"
+        rec = "🟢 STRONG BUY"
     elif score >= 55 and profile.win_rate >= copy_min_win_rate:
-        rec = "🟡 CONSIDER — trader has solid stats"
+        rec = "🟡 CONSIDER"
     else:
-        rec = "🔴 SKIP — insufficient track record"
+        rec = "🔴 SKIP"
 
     return score, rec
 

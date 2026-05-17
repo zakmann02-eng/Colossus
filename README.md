@@ -1,6 +1,6 @@
 # Colossus Trading Alert Bot
 
-Monitors two Polymarket wallets for new trades and sends Telegram alerts with a copy-trade recommendation score.
+Monitors two Polymarket wallets for new trades and sends Telegram alerts with a trade recommendation score.
 
 ## Watched Wallets (pre-configured)
 
@@ -65,14 +65,14 @@ Each alert contains:
   Win Rate: 68.0%  |  Vol: $45,230  |  Trades: 82
 
 ⚡ Score: 80/100
-🟢 STRONG BUY — copy this trade
+🟢 STRONG BUY
 ```
 
 ### Recommendation key
 
 | Label | Meaning |
 |-------|---------|
-| 🟢 STRONG BUY | Score ≥ 75, solid win rate & volume — consider copying |
+| 🟢 STRONG BUY | Score ≥ 75, solid win rate & volume |
 | 🟡 CONSIDER | Score 55–74 — trader stats are decent |
 | 🔴 SKIP | Score < 55 — not enough track record to follow |
 
