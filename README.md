@@ -6,8 +6,8 @@ Monitors two Polymarket wallets for new trades and sends Telegram alerts with a 
 
 | Label | Address |
 |-------|---------|
-| Trader_A | `0x2005d16a84ceefa912d4e380cd32e7ff827875ea` |
-| Trader_B | `0x751a2b86cab503496efd325c8344e10159349ea1` |
+| ColossusRN | `0x2005d16a84ceefa912d4e380cd32e7ff827875ea` |
+| ColossusShark | `0x751a2b86cab503496efd325c8344e10159349ea1` |
 
 ---
 
@@ -99,7 +99,7 @@ python main.py --lookup some_username
 | `TELEGRAM_BOT_TOKEN` | *required* | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | *required* | Your Telegram user/chat ID |
 | `WATCHED_WALLETS` | pre-set | Comma-separated wallet addresses |
-| `WALLET_LABELS` | `Trader_A,Trader_B` | Friendly names shown in alerts |
+| `WALLET_LABELS` | `ColossusRN,ColossusShark` | Friendly names shown in alerts |
 | `POLL_INTERVAL` | `30` | Seconds between checks |
 | `COPY_TRADE_MIN_WIN_RATE` | `0.55` | Minimum win rate for a recommendation |
 | `COPY_TRADE_MIN_VOLUME` | `10000` | Minimum volume ($) for a recommendation |
