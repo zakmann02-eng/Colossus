@@ -48,53 +48,61 @@ def _position_key(market_id: str, outcome: str) -> str:
 
 
 def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score: int, rec: str, is_new: bool) -> str:
-    action = "🟢 *NEW ENTRY*" if is_new else "🟢 *ADDING TO POSITION*"
+    header = "━━━━━━  🟢 ENTERED  ━━━━━━" if is_new else "━━━━━━  🟢 ADDED  ━━━━━━"
+    action_line = "🆕 *New Position Opened*" if is_new else "➕ *Added to Existing Position*"
     lines = [
-        f"{action}",
+        header,
+        action_line,
         f"",
-        f"👤 *Wallet:* `{label}` (`{trade.wallet[:8]}…`)",
-        f"📊 *Market:* {trade.market_name}",
-        f"🎯 *Outcome:* {trade.outcome}",
+        f"👤 *{label}*  (`{trade.wallet[:8]}…`)",
+        f"📊 {trade.market_name}",
+        f"🎯 Outcome: *{trade.outcome}*",
         f"",
-        f"📈 BUY  |  Price: {trade.price * 100:.1f}¢  |  Size: {trade.size:.1f} shares",
-        f"💵 *Value:* ${trade.usd_value:,.2f}",
+        f"📈 *BUY*",
+        f"   Price:  {trade.price * 100:.1f}¢",
+        f"   Size:   {trade.size:.1f} shares",
+        f"   Value:  ${trade.usd_value:,.2f}",
         f"",
-        f"📋 *Trader Stats*",
-        f"  Win Rate: {profile.win_rate * 100:.1f}%  |  Vol: ${profile.total_volume:,.0f}  |  Trades: {profile.total_trades}",
-        f"",
-        f"⚡ *Score:* {score}/100  {rec}",
+        f"📋 Trader  |  WR: {profile.win_rate * 100:.1f}%  |  Vol: ${profile.total_volume:,.0f}",
+        f"⚡ Score: {score}/100  —  {rec}",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
     ]
     return "\n".join(lines)
 
 
 def _format_exit_alert(trade: Trade, label: str, profile: TraderProfile, avg_entry: float | None, is_full: bool) -> str:
-    action = "🔴 *FULL EXIT*" if is_full else "🔴 *PARTIAL EXIT*"
-    lines = [
-        f"{action}",
-        f"",
-        f"👤 *Wallet:* `{label}` (`{trade.wallet[:8]}…`)",
-        f"📊 *Market:* {trade.market_name}",
-        f"🎯 *Outcome:* {trade.outcome}",
-        f"",
-        f"📉 SELL  |  Price: {trade.price * 100:.1f}¢  |  Size: {trade.size:.1f} shares",
-        f"💵 *Value:* ${trade.usd_value:,.2f}",
-    ]
+    header = "━━━━━━  🔴 EXITED  ━━━━━━" if is_full else "━━━━━━  🔴 REDUCED  ━━━━━━"
+    action_line = "🚪 *Position Fully Closed*" if is_full else "✂️ *Position Partially Closed*"
 
+    pnl_block = []
     if avg_entry and avg_entry > 0:
         pnl_pct = (trade.price - avg_entry) / avg_entry * 100
         pnl_usd = (trade.price - avg_entry) * trade.size
         sign = "+" if pnl_pct >= 0 else ""
-        lines += [
+        result = "✅ PROFIT" if pnl_pct >= 0 else "❌ LOSS"
+        pnl_block = [
             f"",
-            f"📊 *P&L*",
-            f"  Entry: {avg_entry * 100:.1f}¢  →  Exit: {trade.price * 100:.1f}¢",
-            f"  {sign}{pnl_pct:.1f}%  |  {sign}${pnl_usd:,.2f}",
+            f"💰 *P&L  —  {result}*",
+            f"   Entry:  {avg_entry * 100:.1f}¢  →  Exit: {trade.price * 100:.1f}¢",
+            f"   Return: {sign}{pnl_pct:.1f}%  ({sign}${pnl_usd:,.2f})",
         ]
 
-    lines += [
+    lines = [
+        header,
+        action_line,
         f"",
-        f"📋 *Trader Stats*",
-        f"  Win Rate: {profile.win_rate * 100:.1f}%  |  Vol: ${profile.total_volume:,.0f}  |  Trades: {profile.total_trades}",
+        f"👤 *{label}*  (`{trade.wallet[:8]}…`)",
+        f"📊 {trade.market_name}",
+        f"🎯 Outcome: *{trade.outcome}*",
+        f"",
+        f"📉 *SELL*",
+        f"   Price:  {trade.price * 100:.1f}¢",
+        f"   Size:   {trade.size:.1f} shares",
+        f"   Value:  ${trade.usd_value:,.2f}",
+        *pnl_block,
+        f"",
+        f"📋 Trader  |  WR: {profile.win_rate * 100:.1f}%  |  Vol: ${profile.total_volume:,.0f}",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
     ]
     return "\n".join(lines)
 
