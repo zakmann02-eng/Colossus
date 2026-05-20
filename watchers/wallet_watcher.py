@@ -47,23 +47,17 @@ def _position_key(market_id: str, outcome: str) -> str:
     return f"{market_id}:{outcome}".lower()
 
 
-def _trade_datetime(ts: int) -> str:
-    if not ts:
-        return "Unknown"
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    return dt.strftime("%b %d, %Y  %H:%M UTC")
-
-
-def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score: int, rec: str, is_new: bool) -> str:
+def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score: int, rec: str, is_new: bool, event_date: str) -> str:
     header = "━━━━━━  🟢 ENTERED  ━━━━━━" if is_new else "━━━━━━  🟢 ADDED  ━━━━━━"
     action_line = "🆕 *New Position Opened*" if is_new else "➕ *Added to Existing Position*"
+    date_line = f"📅 Event Date: *{event_date}*" if event_date else ""
     lines = [
         header,
         action_line,
         f"",
         f"👤 *{label}*  (`{trade.wallet[:8]}…`)",
-        f"🕐 {_trade_datetime(trade.timestamp)}",
         f"📊 {trade.market_name}",
+        *([ date_line ] if date_line else []),
         f"🎯 Outcome: *{trade.outcome}*",
         f"",
         f"📈 *BUY*",
@@ -78,9 +72,10 @@ def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score:
     return "\n".join(lines)
 
 
-def _format_exit_alert(trade: Trade, label: str, profile: TraderProfile, avg_entry: float | None, is_full: bool) -> str:
+def _format_exit_alert(trade: Trade, label: str, profile: TraderProfile, avg_entry: float | None, is_full: bool, event_date: str) -> str:
     header = "━━━━━━  🔴 EXITED  ━━━━━━" if is_full else "━━━━━━  🔴 REDUCED  ━━━━━━"
     action_line = "🚪 *Position Fully Closed*" if is_full else "✂️ *Position Partially Closed*"
+    date_line = f"📅 Event Date: *{event_date}*" if event_date else ""
 
     pnl_block = []
     if avg_entry and avg_entry > 0:
@@ -100,8 +95,8 @@ def _format_exit_alert(trade: Trade, label: str, profile: TraderProfile, avg_ent
         action_line,
         f"",
         f"👤 *{label}*  (`{trade.wallet[:8]}…`)",
-        f"🕐 {_trade_datetime(trade.timestamp)}",
         f"📊 {trade.market_name}",
+        *([ date_line ] if date_line else []),
         f"🎯 Outcome: *{trade.outcome}*",
         f"",
         f"📉 *SELL*",
@@ -198,6 +193,7 @@ class WalletWatcher:
                 profile = self._profiles.get(addr, TraderProfile(wallet=addr))
                 label = self._labels.get(addr, addr[:8])
                 pkey = _position_key(trade.market_id, trade.outcome)
+                event_date = await self._client.get_market_end_date(trade.market_id)
 
                 if trade.side == "BUY":
                     score, rec = _score_trade(trade, profile, self._copy_min_win_rate, self._copy_min_volume)
@@ -205,13 +201,13 @@ class WalletWatcher:
                         logger.info("Entry scored %d/100 — below threshold, skipping", score)
                         continue
                     is_new = pkey not in before
-                    msg = _format_entry_alert(trade, label, profile, score, rec, is_new)
+                    msg = _format_entry_alert(trade, label, profile, score, rec, is_new, event_date)
 
                 else:  # SELL / EXIT
                     prev = before.get(pkey)
                     avg_entry = prev.avg_price if prev else None
                     is_full = pkey not in after
-                    msg = _format_exit_alert(trade, label, profile, avg_entry, is_full)
+                    msg = _format_exit_alert(trade, label, profile, avg_entry, is_full, event_date)
 
                 if self._alert_cb:
                     await self._alert_cb(msg)

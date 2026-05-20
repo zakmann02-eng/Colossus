@@ -62,6 +62,40 @@ class PolymarketClient:
             logger.debug("GET %s failed: %s", url, exc)
             return None
 
+    async def get_market_end_date(self, market_id: str) -> str:
+        """Return the market resolution/end date as a formatted string, or empty string if unavailable."""
+        if not market_id:
+            return ""
+        data = await self._get(f"{GAMMA_API}/markets", params={"id": market_id})
+        if not data:
+            data = await self._get(f"{GAMMA_API}/markets/{market_id}")
+        market = None
+        if isinstance(data, list) and data:
+            market = data[0]
+        elif isinstance(data, dict) and "id" in data:
+            market = data
+        if not market:
+            return ""
+        raw = (
+            market.get("endDate")
+            or market.get("resolutionTime")
+            or market.get("closeTime")
+            or market.get("endDateIso")
+            or ""
+        )
+        if not raw:
+            return ""
+        try:
+            from datetime import datetime, timezone
+            if isinstance(raw, (int, float)):
+                dt = datetime.fromtimestamp(raw, tz=timezone.utc)
+            else:
+                raw_str = str(raw).replace("Z", "+00:00")
+                dt = datetime.fromisoformat(raw_str)
+            return dt.strftime("%b %d, %Y")
+        except Exception:
+            return str(raw)[:10]
+
     async def is_market_us_accessible(self, market_id: str) -> bool:
         """Returns True if the market is not restricted for US users."""
         if not market_id:
