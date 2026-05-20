@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,7 +10,19 @@ logger = logging.getLogger(__name__)
 
 DATA_API = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
+CLOB_API = "https://clob.polymarket.com"
 POLY_API = "https://polymarket.com"
+
+
+@dataclass
+class MarketTrend:
+    current_price: float       # 0–1
+    price_7d_ago: float        # 0–1
+    price_1d_ago: float        # 0–1
+    change_7d_pct: float       # % change over 7 days
+    change_1d_pct: float       # % change over 24 hours
+    direction: str             # "bullish" | "bearish" | "sideways"
+    success_probability: float # adjusted probability 0–100
 
 
 @dataclass
@@ -61,6 +74,98 @@ class PolymarketClient:
         except Exception as exc:
             logger.debug("GET %s failed: %s", url, exc)
             return None
+
+    async def get_market_trend(self, market_id: str, outcome: str, current_price: float) -> MarketTrend:
+        """Fetch price history and compute trend + success probability for a market outcome."""
+        now = int(time.time())
+        start_7d = now - 7 * 86400
+        start_1d = now - 86400
+
+        # Resolve token ID for this outcome from the market
+        token_id = await self._resolve_token_id(market_id, outcome)
+
+        history_7d = await self._fetch_price_history(market_id, token_id, start_7d, now, fidelity=480)
+        history_1d = await self._fetch_price_history(market_id, token_id, start_1d, now, fidelity=60)
+
+        price_7d_ago = history_7d[0] if history_7d else current_price
+        price_1d_ago = history_1d[0] if history_1d else current_price
+
+        change_7d = (current_price - price_7d_ago) / price_7d_ago * 100 if price_7d_ago > 0 else 0.0
+        change_1d = (current_price - price_1d_ago) / price_1d_ago * 100 if price_1d_ago > 0 else 0.0
+
+        if change_7d > 3:
+            direction = "bullish"
+        elif change_7d < -3:
+            direction = "bearish"
+        else:
+            direction = "sideways"
+
+        # Momentum bonus/penalty: trend in the direction of current price
+        momentum = min(max(change_7d * 0.3 + change_1d * 0.5, -15), 15)
+        success_prob = min(max(current_price * 100 + momentum, 1), 99)
+
+        return MarketTrend(
+            current_price=current_price,
+            price_7d_ago=price_7d_ago,
+            price_1d_ago=price_1d_ago,
+            change_7d_pct=change_7d,
+            change_1d_pct=change_1d,
+            direction=direction,
+            success_probability=success_prob,
+        )
+
+    async def _resolve_token_id(self, market_id: str, outcome: str) -> str | None:
+        data = await self._get(f"{GAMMA_API}/markets", params={"id": market_id})
+        if not data:
+            data = await self._get(f"{GAMMA_API}/markets/{market_id}")
+        market = None
+        if isinstance(data, list) and data:
+            market = data[0]
+        elif isinstance(data, dict) and "id" in data:
+            market = data
+        if not market:
+            return None
+        tokens = market.get("clobTokenIds") or market.get("tokens") or []
+        if isinstance(tokens, str):
+            import json
+            try:
+                tokens = json.loads(tokens)
+            except Exception:
+                return None
+        outcome_lower = outcome.lower()
+        for i, tok in enumerate(tokens):
+            label = ""
+            if isinstance(tok, dict):
+                label = tok.get("outcome", tok.get("label", "")).lower()
+                tid = tok.get("token_id") or tok.get("id") or ""
+            else:
+                tid = str(tok)
+                label = "yes" if i == 0 else "no"
+            if outcome_lower in label or label in outcome_lower:
+                return tid
+        return tokens[0] if tokens else None
+
+    async def _fetch_price_history(self, market_id: str, token_id: str | None, start_ts: int, end_ts: int, fidelity: int = 60) -> list[float]:
+        params: dict = {"startTs": start_ts, "endTs": end_ts, "fidelity": fidelity}
+        if token_id:
+            params["tokenId"] = token_id
+        else:
+            params["market"] = market_id
+        data = await self._get(f"{CLOB_API}/prices-history", params=params)
+        if not data:
+            return []
+        history = data.get("history") or data if isinstance(data, list) else []
+        prices = []
+        for point in history:
+            if isinstance(point, dict):
+                p = point.get("p") or point.get("price") or point.get("value")
+            else:
+                p = point
+            try:
+                prices.append(float(p))
+            except (TypeError, ValueError):
+                pass
+        return prices
 
     async def get_market_end_date(self, market_id: str) -> str:
         """Return the market resolution/end date as a formatted string, or empty string if unavailable."""

@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, Awaitable
 
-from polymarket.client import PolymarketClient, Trade, Position, TraderProfile
+from polymarket.client import PolymarketClient, Trade, Position, TraderProfile, MarketTrend
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,28 @@ def _position_key(market_id: str, outcome: str) -> str:
     return f"{market_id}:{outcome}".lower()
 
 
-def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score: int, rec: str, is_new: bool, event_date: str) -> str:
+def _trend_block(trend: MarketTrend | None) -> list[str]:
+    if not trend:
+        return []
+    dir_emoji = {"bullish": "📈", "bearish": "📉", "sideways": "➡️"}.get(trend.direction, "➡️")
+    sign_7d = "+" if trend.change_7d_pct >= 0 else ""
+    sign_1d = "+" if trend.change_1d_pct >= 0 else ""
+    prob = trend.success_probability
+    if prob >= 65:
+        prob_label = "🟢 High"
+    elif prob >= 45:
+        prob_label = "🟡 Moderate"
+    else:
+        prob_label = "🔴 Low"
+    return [
+        f"",
+        f"🔮 *Market Trend  —  {dir_emoji} {trend.direction.capitalize()}*",
+        f"   7d:  {sign_7d}{trend.change_7d_pct:.1f}%   |   24h: {sign_1d}{trend.change_1d_pct:.1f}%",
+        f"   Success Probability: *{prob:.0f}%*  ({prob_label})",
+    ]
+
+
+def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score: int, rec: str, is_new: bool, event_date: str, trend: MarketTrend | None) -> str:
     header = "━━━━━━  🟢 ENTERED  ━━━━━━" if is_new else "━━━━━━  🟢 ADDED  ━━━━━━"
     action_line = "🆕 *New Position Opened*" if is_new else "➕ *Added to Existing Position*"
     date_line = f"📅 Event Date: *{event_date}*" if event_date else ""
@@ -64,6 +85,7 @@ def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score:
         f"   Price:  {trade.price * 100:.1f}¢",
         f"   Size:   {trade.size:.1f} shares",
         f"   Value:  ${trade.usd_value:,.2f}",
+        *_trend_block(trend),
         f"",
         f"📋 Trader  |  WR: {profile.win_rate * 100:.1f}%  |  Vol: ${profile.total_volume:,.0f}",
         f"⚡ Score: {score}/100  —  {rec}",
@@ -72,7 +94,7 @@ def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score:
     return "\n".join(lines)
 
 
-def _format_exit_alert(trade: Trade, label: str, profile: TraderProfile, avg_entry: float | None, is_full: bool, event_date: str) -> str:
+def _format_exit_alert(trade: Trade, label: str, profile: TraderProfile, avg_entry: float | None, is_full: bool, event_date: str, trend: MarketTrend | None) -> str:
     header = "━━━━━━  🔴 EXITED  ━━━━━━" if is_full else "━━━━━━  🔴 REDUCED  ━━━━━━"
     action_line = "🚪 *Position Fully Closed*" if is_full else "✂️ *Position Partially Closed*"
     date_line = f"📅 Event Date: *{event_date}*" if event_date else ""
@@ -104,6 +126,7 @@ def _format_exit_alert(trade: Trade, label: str, profile: TraderProfile, avg_ent
         f"   Size:   {trade.size:.1f} shares",
         f"   Value:  ${trade.usd_value:,.2f}",
         *pnl_block,
+        *_trend_block(trend),
         f"",
         f"📋 Trader  |  WR: {profile.win_rate * 100:.1f}%  |  Vol: ${profile.total_volume:,.0f}",
         "━━━━━━━━━━━━━━━━━━━━━━━",
@@ -194,6 +217,11 @@ class WalletWatcher:
                 label = self._labels.get(addr, addr[:8])
                 pkey = _position_key(trade.market_id, trade.outcome)
                 event_date = await self._client.get_market_end_date(trade.market_id)
+                try:
+                    trend = await self._client.get_market_trend(trade.market_id, trade.outcome, trade.price)
+                except Exception as exc:
+                    logger.debug("Trend fetch failed: %s", exc)
+                    trend = None
 
                 if trade.side == "BUY":
                     score, rec = _score_trade(trade, profile, self._copy_min_win_rate, self._copy_min_volume)
@@ -201,13 +229,13 @@ class WalletWatcher:
                         logger.info("Entry scored %d/100 — below threshold, skipping", score)
                         continue
                     is_new = pkey not in before
-                    msg = _format_entry_alert(trade, label, profile, score, rec, is_new, event_date)
+                    msg = _format_entry_alert(trade, label, profile, score, rec, is_new, event_date, trend)
 
                 else:  # SELL / EXIT
                     prev = before.get(pkey)
                     avg_entry = prev.avg_price if prev else None
                     is_full = pkey not in after
-                    msg = _format_exit_alert(trade, label, profile, avg_entry, is_full, event_date)
+                    msg = _format_exit_alert(trade, label, profile, avg_entry, is_full, event_date, trend)
 
                 if self._alert_cb:
                     await self._alert_cb(msg)
