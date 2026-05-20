@@ -47,6 +47,13 @@ def _position_key(market_id: str, outcome: str) -> str:
     return f"{market_id}:{outcome}".lower()
 
 
+def _trade_datetime(ts: int) -> str:
+    if not ts:
+        return "Unknown"
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    return dt.strftime("%b %d, %Y  %H:%M UTC")
+
+
 def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score: int, rec: str, is_new: bool) -> str:
     header = "━━━━━━  🟢 ENTERED  ━━━━━━" if is_new else "━━━━━━  🟢 ADDED  ━━━━━━"
     action_line = "🆕 *New Position Opened*" if is_new else "➕ *Added to Existing Position*"
@@ -55,6 +62,7 @@ def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score:
         action_line,
         f"",
         f"👤 *{label}*  (`{trade.wallet[:8]}…`)",
+        f"🕐 {_trade_datetime(trade.timestamp)}",
         f"📊 {trade.market_name}",
         f"🎯 Outcome: *{trade.outcome}*",
         f"",
@@ -92,6 +100,7 @@ def _format_exit_alert(trade: Trade, label: str, profile: TraderProfile, avg_ent
         action_line,
         f"",
         f"👤 *{label}*  (`{trade.wallet[:8]}…`)",
+        f"🕐 {_trade_datetime(trade.timestamp)}",
         f"📊 {trade.market_name}",
         f"🎯 Outcome: *{trade.outcome}*",
         f"",
