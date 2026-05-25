@@ -168,38 +168,55 @@ class PolymarketClient:
         return prices
 
     async def get_market_end_date(self, market_id: str) -> str:
-        """Return the market resolution/end date as a formatted string, or empty string if unavailable."""
+        """Return the market resolution/end date as a formatted string. Always returns a value."""
         if not market_id:
-            return ""
-        data = await self._get(f"{GAMMA_API}/markets", params={"id": market_id})
-        if not data:
-            data = await self._get(f"{GAMMA_API}/markets/{market_id}")
+            return "N/A"
+
+        # Try Gamma API with id param, then direct endpoint, then conditionId
         market = None
-        if isinstance(data, list) and data:
-            market = data[0]
-        elif isinstance(data, dict) and "id" in data:
-            market = data
+        for attempt in [
+            lambda: self._get(f"{GAMMA_API}/markets", params={"id": market_id}),
+            lambda: self._get(f"{GAMMA_API}/markets/{market_id}"),
+            lambda: self._get(f"{GAMMA_API}/markets", params={"conditionId": market_id}),
+            lambda: self._get(f"{GAMMA_API}/events", params={"id": market_id}),
+        ]:
+            data = await attempt()
+            if isinstance(data, list) and data:
+                market = data[0]
+                break
+            elif isinstance(data, dict) and ("id" in data or "endDate" in data or "resolutionTime" in data):
+                market = data
+                break
+
         if not market:
-            return ""
+            return "N/A"
+
+        # Try every known date field in priority order
         raw = (
             market.get("endDate")
+            or market.get("endDateIso")
             or market.get("resolutionTime")
             or market.get("closeTime")
-            or market.get("endDateIso")
+            or market.get("end_date")
+            or market.get("expirationDate")
+            or market.get("expiration")
             or ""
         )
+
         if not raw:
-            return ""
+            return "N/A"
+
         try:
             from datetime import datetime, timezone
             if isinstance(raw, (int, float)):
-                dt = datetime.fromtimestamp(raw, tz=timezone.utc)
+                dt = datetime.fromtimestamp(float(raw), tz=timezone.utc)
             else:
                 raw_str = str(raw).replace("Z", "+00:00")
                 dt = datetime.fromisoformat(raw_str)
             return dt.strftime("%b %d, %Y")
         except Exception:
-            return str(raw)[:10]
+            # Return whatever raw string we got, trimmed
+            return str(raw)[:10] or "N/A"
 
     async def is_market_us_accessible(self, market_id: str) -> bool:
         """Returns True if the market is not restricted for US users."""

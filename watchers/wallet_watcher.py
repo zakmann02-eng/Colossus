@@ -71,14 +71,13 @@ def _trend_block(trend: MarketTrend | None) -> list[str]:
 def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score: int, rec: str, is_new: bool, event_date: str, trend: MarketTrend | None) -> str:
     header = "━━━━━━  🟢 ENTERED  ━━━━━━" if is_new else "━━━━━━  🟢 ADDED  ━━━━━━"
     action_line = "🆕 *New Position Opened*" if is_new else "➕ *Added to Existing Position*"
-    date_line = f"📅 Event Date: *{event_date}*" if event_date else ""
     lines = [
         header,
         action_line,
         f"",
         f"👤 *{label}*  (`{trade.wallet[:8]}…`)",
         f"📊 {trade.market_name}",
-        *([ date_line ] if date_line else []),
+        f"📅 Event Date: *{event_date}*",
         f"🎯 Outcome: *{trade.outcome}*",
         f"",
         f"📈 *BUY*",
@@ -97,8 +96,6 @@ def _format_entry_alert(trade: Trade, label: str, profile: TraderProfile, score:
 def _format_exit_alert(trade: Trade, label: str, profile: TraderProfile, avg_entry: float | None, is_full: bool, event_date: str, trend: MarketTrend | None) -> str:
     header = "━━━━━━  🔴 EXITED  ━━━━━━" if is_full else "━━━━━━  🔴 REDUCED  ━━━━━━"
     action_line = "🚪 *Position Fully Closed*" if is_full else "✂️ *Position Partially Closed*"
-    date_line = f"📅 Event Date: *{event_date}*" if event_date else ""
-
     pnl_block = []
     if avg_entry and avg_entry > 0:
         pnl_pct = (trade.price - avg_entry) / avg_entry * 100
@@ -118,7 +115,7 @@ def _format_exit_alert(trade: Trade, label: str, profile: TraderProfile, avg_ent
         f"",
         f"👤 *{label}*  (`{trade.wallet[:8]}…`)",
         f"📊 {trade.market_name}",
-        *([ date_line ] if date_line else []),
+        f"📅 Event Date: *{event_date}*",
         f"🎯 Outcome: *{trade.outcome}*",
         f"",
         f"📉 *SELL*",
