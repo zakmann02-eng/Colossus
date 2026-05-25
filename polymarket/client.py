@@ -168,38 +168,53 @@ class PolymarketClient:
         return prices
 
     async def get_market_end_date(self, market_id: str) -> str:
-        """Return the market resolution/end date as a formatted string. Always returns a value."""
+        """Return the game/event date for a market. Always returns a value."""
         if not market_id:
             return "N/A"
 
-        # Try Gamma API with id param, then direct endpoint, then conditionId
         market = None
+        event = None
+
         for attempt in [
             lambda: self._get(f"{GAMMA_API}/markets", params={"id": market_id}),
             lambda: self._get(f"{GAMMA_API}/markets/{market_id}"),
             lambda: self._get(f"{GAMMA_API}/markets", params={"conditionId": market_id}),
-            lambda: self._get(f"{GAMMA_API}/events", params={"id": market_id}),
         ]:
             data = await attempt()
             if isinstance(data, list) and data:
                 market = data[0]
                 break
-            elif isinstance(data, dict) and ("id" in data or "endDate" in data or "resolutionTime" in data):
+            elif isinstance(data, dict) and ("id" in data or "endDate" in data or "startDate" in data):
                 market = data
                 break
 
-        if not market:
+        # Also try to fetch the parent event for sports markets (has the actual game date)
+        if market:
+            event_id = market.get("eventId") or market.get("event_id") or market.get("parentEventId")
+            if event_id:
+                ev_data = await self._get(f"{GAMMA_API}/events/{event_id}")
+                if isinstance(ev_data, dict):
+                    event = ev_data
+                elif isinstance(ev_data, list) and ev_data:
+                    event = ev_data[0]
+
+        if not market and not event:
             return "N/A"
 
-        # Try every known date field in priority order
+        # Priority order: game start date first, then resolution/end date
+        # For sports markets, startDate = when the game is played
         raw = (
-            market.get("endDate")
-            or market.get("endDateIso")
-            or market.get("resolutionTime")
-            or market.get("closeTime")
-            or market.get("end_date")
-            or market.get("expirationDate")
-            or market.get("expiration")
+            (event or {}).get("startDate")
+            or (event or {}).get("start_date")
+            or (event or {}).get("gameDate")
+            or (market or {}).get("startDate")
+            or (market or {}).get("start_date")
+            or (market or {}).get("gameDate")
+            or (market or {}).get("endDate")
+            or (market or {}).get("endDateIso")
+            or (market or {}).get("resolutionTime")
+            or (market or {}).get("closeTime")
+            or (market or {}).get("expirationDate")
             or ""
         )
 
@@ -215,7 +230,6 @@ class PolymarketClient:
                 dt = datetime.fromisoformat(raw_str)
             return dt.strftime("%b %d, %Y")
         except Exception:
-            # Return whatever raw string we got, trimmed
             return str(raw)[:10] or "N/A"
 
     async def is_market_us_accessible(self, market_id: str) -> bool:
@@ -239,24 +253,38 @@ class PolymarketClient:
             self._market_status_cache[cache_key] = True
             return True
 
+        # Sports/game markets are always accessible in the US — pass them through immediately
+        _SPORTS_KEYWORDS = {
+            "nba", "nfl", "mlb", "nhl", "mls", "ufc", "nascar",
+            "basketball", "football", "baseball", "hockey", "soccer",
+            "tennis", "golf", "boxing", "mma", "cricket", "rugby",
+            "champions league", "premier league", "la liga", "bundesliga",
+            "world cup", "super bowl", "playoffs", "championship",
+            "match", "game", "series", "tournament", "open",
+        }
+        category = (market.get("category") or "").lower()
+        tags = [t.lower() if isinstance(t, str) else (t.get("label") or t.get("name") or "").lower()
+                for t in (market.get("tags") or [])]
+        title = (market.get("question") or market.get("title") or "").lower()
+        combined = f"{category} {' '.join(tags)} {title}"
+
+        for kw in _SPORTS_KEYWORDS:
+            if kw in combined:
+                self._market_status_cache[cache_key] = True
+                return True
+
         # Explicit US restriction flag
         if market.get("restricted") or market.get("umaResolutionStatus") == "restricted":
             self._market_status_cache[cache_key] = False
             return False
 
-        # Block markets by restricted category or tags
+        # Block non-sports markets by restricted political keywords
         _BLOCKED_KEYWORDS = {
             "us politics", "us elections", "us election", "us political",
             "united states politics", "american politics",
             "us congress", "us senate", "us house", "us president",
             "trump", "harris", "biden", "2024 election", "2026 election",
         }
-        category = (market.get("category") or "").lower()
-        tags = [t.lower() if isinstance(t, str) else (t.get("label") or t.get("name") or "").lower()
-                for t in (market.get("tags") or [])]
-        title = (market.get("question") or market.get("title") or "").lower()
-
-        combined = f"{category} {' '.join(tags)} {title}"
         for kw in _BLOCKED_KEYWORDS:
             if kw in combined:
                 logger.info("Market blocked for US: '%s' (matched '%s')", market.get("question", market_id), kw)
