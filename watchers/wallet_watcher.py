@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Callable, Awaitable
 
@@ -268,6 +269,11 @@ class WalletWatcher:
     async def run_forever(self) -> None:
         refresh_counter = 0
         while True:
+            if os.getenv("PAUSED", "").lower() in ("1", "true", "yes"):
+                logger.info("Bot is PAUSED — skipping wallet checks")
+                await asyncio.sleep(self._poll_interval)
+                continue
+
             for addr in self._wallets:
                 await self._check_wallet(addr)
 
