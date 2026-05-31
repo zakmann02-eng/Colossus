@@ -95,6 +95,21 @@ async def scan_markets(
         logger.info("Bot paused — skipping scan")
         return
 
+    # Balance check — stop trading if insufficient funds
+    balance = await client.get_usdc_balance()
+    logger.info("USDC balance: $%.2f", balance)
+    if balance < MAX_TRADE_USD:
+        logger.warning("Insufficient balance ($%.2f) — skipping scan", balance)
+        if not getattr(scan_markets, "_low_balance_alerted", False):
+            await _send(app, (
+                f"⚠️ *Insufficient funds*\n"
+                f"Balance: ${balance:.2f} (need ${MAX_TRADE_USD:.2f})\n"
+                "Bot will resume trading once funds are added."
+            ))
+            scan_markets._low_balance_alerted = True
+        return
+    scan_markets._low_balance_alerted = False
+
     logger.info("Scanning sports markets…")
     markets = await client.get_sports_markets(limit=200)
     logger.info("Found %d eligible markets", len(markets))

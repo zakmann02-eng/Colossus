@@ -144,6 +144,29 @@ class PolymarketClient:
     # Open positions                                                    #
     # ---------------------------------------------------------------- #
 
+    async def get_usdc_balance(self) -> float:
+        """Return available USDC balance on Polymarket."""
+        # Try CLOB API balance endpoint first
+        data = await self._get(f"{CLOB_API}/balance", params={"address": self._address})
+        if data:
+            try:
+                return float(data.get("balance") or data.get("usdc") or 0)
+            except Exception:
+                pass
+        # Fallback: Data API profile
+        data = await self._get(f"{DATA_API}/profile", params={"address": self._address})
+        if data:
+            try:
+                return float(
+                    data.get("usdcBalance")
+                    or data.get("balance")
+                    or data.get("cashBalance")
+                    or 0
+                )
+            except Exception:
+                pass
+        return 0.0
+
     async def get_open_positions(self) -> list[dict]:
         data = await self._get(
             f"{DATA_API}/positions",
