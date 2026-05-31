@@ -3,12 +3,6 @@
 Monitors two Polymarket wallets for new trades and sends Telegram alerts with a trade recommendation score.
 
 ## Watched Wallets (pre-configured)
-
-| Label | Address |
-|-------|---------|
-| ColossusRN | `0x2005d16a84ceefa912d4e380cd32e7ff827875ea` |
-| ColossusShark | `0x751a2b86cab503496efd325c8344e10159349ea1` |
-
 ---
 
 ## Quick Setup
