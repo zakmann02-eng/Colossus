@@ -1,11 +1,10 @@
 """
-Polymarket API client — market data + trade execution.
-Execution uses py-clob-client (official Polymarket Python SDK).
+Polymarket API client — market data only.
+No private key required. Uses public APIs for market scanning and pricing.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -13,14 +12,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
-from eth_account import Account
 
 logger = logging.getLogger(__name__)
 
 DATA_API  = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
-POLYGON_CHAIN_ID = 137
 
 # ── Hard-block keywords ──────────────────────────────────────────────────────
 
@@ -44,41 +41,9 @@ _ALLOWED_SPORTS = {
 
 
 class PolymarketClient:
-    def __init__(self, session: aiohttp.ClientSession, private_key: str) -> None:
+    def __init__(self, session: aiohttp.ClientSession) -> None:
         self._s = session
-        self._private_key = private_key.strip()
-        # Ensure 0x prefix
-        if self._private_key and not self._private_key.startswith("0x"):
-            self._private_key = "0x" + self._private_key
-        try:
-            self._address = Account.from_key(self._private_key).address.lower()
-        except Exception as exc:
-            raise ValueError(
-                f"POLYMARKET_PRIVATE_KEY is invalid: {exc}\n"
-                "It must be a 64-character hex string (your Polygon/MetaMask private key). "
-                "Do NOT use a seed phrase."
-            ) from exc
-        self._clob_client = self._init_clob_client()
         self._market_cache: dict[str, dict] = {}
-
-    def _init_clob_client(self):
-        try:
-            from py_clob_client.client import ClobClient
-            client = ClobClient(
-                host=CLOB_API,
-                key=self._private_key,
-                chain_id=POLYGON_CHAIN_ID,
-            )
-            client.set_api_creds(client.create_or_derive_api_creds())
-            logger.info("CLOB client initialised — wallet %s", self._address[:10])
-            return client
-        except Exception as exc:
-            logger.error("Failed to init CLOB client: %s", exc)
-            return None
-
-    @property
-    def address(self) -> str:
-        return self._address
 
     # ---------------------------------------------------------------- #
     # Core HTTP                                                         #
@@ -100,7 +65,6 @@ class PolymarketClient:
     # ---------------------------------------------------------------- #
 
     async def get_sports_markets(self, limit: int = 200) -> list[dict]:
-        """Fetch active markets and return only allowed sports markets."""
         data = await self._get(
             f"{GAMMA_API}/markets",
             params={"active": "true", "closed": "false", "limit": limit,
@@ -120,23 +84,21 @@ class PolymarketClient:
                 for t in (market.get("tags") or [])
             ),
         ])
-        # Hard block
         for kw in _BLOCKED:
             if kw in text:
                 return False
-        # Must match an allowed sport
         for kw in _ALLOWED_SPORTS:
             if kw in text:
                 return True
         return False
 
     # ---------------------------------------------------------------- #
-    # Price history (for T2 — 15-min price movement)                   #
+    # Price history (T2 — 15-min price movement)                       #
     # ---------------------------------------------------------------- #
 
     async def get_price_15min_ago(self, market: dict, token_id: str) -> float | None:
         now = int(time.time())
-        start = now - 20 * 60  # 20 min window
+        start = now - 20 * 60
         params = {"tokenId": token_id, "startTs": start, "endTs": now, "fidelity": 1}
         data = await self._get(f"{CLOB_API}/prices-history", params=params)
         if not data:
@@ -151,40 +113,8 @@ class PolymarketClient:
             return None
 
     # ---------------------------------------------------------------- #
-    # Open positions                                                    #
+    # Current price                                                     #
     # ---------------------------------------------------------------- #
-
-    async def get_usdc_balance(self) -> float:
-        """Return available USDC balance on Polymarket."""
-        # Try CLOB API balance endpoint first
-        data = await self._get(f"{CLOB_API}/balance", params={"address": self._address})
-        if data:
-            try:
-                return float(data.get("balance") or data.get("usdc") or 0)
-            except Exception:
-                pass
-        # Fallback: Data API profile
-        data = await self._get(f"{DATA_API}/profile", params={"address": self._address})
-        if data:
-            try:
-                return float(
-                    data.get("usdcBalance")
-                    or data.get("balance")
-                    or data.get("cashBalance")
-                    or 0
-                )
-            except Exception:
-                pass
-        return 0.0
-
-    async def get_open_positions(self) -> list[dict]:
-        data = await self._get(
-            f"{DATA_API}/positions",
-            params={"user": self._address, "sizeThreshold": "0.01"},
-        )
-        if not data:
-            return []
-        return data if isinstance(data, list) else data.get("data", [])
 
     async def get_current_price(self, token_id: str) -> float | None:
         data = await self._get(f"{CLOB_API}/last-trade-price", params={"token_id": token_id})
@@ -193,7 +123,6 @@ class PolymarketClient:
                 return float(data.get("price") or 0) or None
             except Exception:
                 pass
-        # Fallback: midpoint from orderbook
         book = await self._get(f"{CLOB_API}/book", params={"token_id": token_id})
         if book:
             try:
@@ -208,62 +137,10 @@ class PolymarketClient:
         return None
 
     # ---------------------------------------------------------------- #
-    # Trade execution                                                   #
-    # ---------------------------------------------------------------- #
-
-    async def place_market_order(
-        self, token_id: str, side: str, amount_usd: float
-    ) -> dict | None:
-        """Place a market order. side = 'BUY' or 'SELL'. amount_usd = USDC to spend."""
-        if not self._clob_client:
-            logger.error("CLOB client not initialised — cannot place order")
-            return None
-        loop = asyncio.get_event_loop()
-        try:
-            result = await loop.run_in_executor(
-                None, self._sync_market_order, token_id, side, amount_usd
-            )
-            return result
-        except Exception as exc:
-            logger.error("Order placement failed: %s", exc)
-            return None
-
-    def _sync_market_order(self, token_id: str, side: str, amount_usd: float) -> dict | None:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType, BUY, SELL
-        s = BUY if side == "BUY" else SELL
-        args = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=s)
-        signed = self._clob_client.create_market_order(args)
-        resp = self._clob_client.post_order(signed, OrderType.FOK)
-        logger.info("Order response: %s", resp)
-        return resp
-
-    async def close_position(self, token_id: str, size: float) -> dict | None:
-        """Sell entire position at market price."""
-        if not self._clob_client:
-            return None
-        loop = asyncio.get_event_loop()
-        try:
-            result = await loop.run_in_executor(
-                None, self._sync_close_position, token_id, size
-            )
-            return result
-        except Exception as exc:
-            logger.error("Close position failed: %s", exc)
-            return None
-
-    def _sync_close_position(self, token_id: str, size: float) -> dict | None:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType, SELL
-        args = MarketOrderArgs(token_id=token_id, amount=size, side=SELL)
-        signed = self._clob_client.create_market_order(args)
-        resp = self._clob_client.post_order(signed, OrderType.FOK)
-        return resp
-
-    # ---------------------------------------------------------------- #
-    # Token ID resolution                                               #
+    # Token ID / market helpers                                         #
     # ---------------------------------------------------------------- #
 
     def resolve_token_id(self, market: dict, side: str) -> str | None:
-        """Get YES or NO token ID from market dict."""
         tokens = market.get("clobTokenIds") or market.get("tokens") or []
         if isinstance(tokens, str):
             try:
@@ -272,7 +149,6 @@ class PolymarketClient:
                 return None
         if not tokens:
             return None
-        # tokens[0] = YES, tokens[1] = NO
         idx = 0 if side == "YES" else 1
         tok = tokens[idx] if idx < len(tokens) else tokens[0]
         if isinstance(tok, dict):
@@ -309,3 +185,10 @@ class PolymarketClient:
             return end_ts - time.time()
         except Exception:
             return None
+
+    def market_url(self, market: dict) -> str:
+        slug = market.get("slug") or market.get("marketSlug") or ""
+        if slug:
+            return f"https://polymarket.com/event/{slug}"
+        mid = market.get("id") or ""
+        return f"https://polymarket.com/event/{mid}" if mid else "https://polymarket.com"
