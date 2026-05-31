@@ -65,7 +65,7 @@ async def evaluate_market(
         return None
 
     price = await client.get_current_price(token_id)
-    if price is None:
+    if not price or price <= 0.001:
         return None
 
     triggers: list[str] = []

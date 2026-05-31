@@ -189,9 +189,13 @@ class PolymarketClient:
             return None
 
     def _sync_market_order(self, token_id: str, side: str, amount_usd: float) -> dict | None:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType, BUY, SELL
-        s = BUY if side == "BUY" else SELL
-        args = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=s)
+        from py_clob_client.clob_types import MarketOrderArgs, OrderType
+        try:
+            from py_clob_client.clob_types import BUY, SELL
+            s = BUY if side == "BUY" else SELL
+        except ImportError:
+            s = 0 if side == "BUY" else 1  # newer versions use int constants
+        args   = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=s)
         signed = self._clob_client.create_market_order(args)
         resp   = self._clob_client.post_order(signed, OrderType.FOK)
         logger.info("Order response: %s", resp)
@@ -210,7 +214,11 @@ class PolymarketClient:
             return None
 
     def _sync_close_position(self, token_id: str, size: float) -> dict | None:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType, SELL
+        from py_clob_client.clob_types import MarketOrderArgs, OrderType
+        try:
+            from py_clob_client.clob_types import SELL
+        except ImportError:
+            SELL = 1
         args   = MarketOrderArgs(token_id=token_id, amount=size, side=SELL)
         signed = self._clob_client.create_market_order(args)
         return self._clob_client.post_order(signed, OrderType.FOK)
