@@ -1,5 +1,5 @@
 aiohttp==3.9.5
 python-telegram-bot==21.3
 python-dotenv==1.0.1
-aiofiles==23.2.1
-pydantic==2.7.4
+APScheduler==3.10.4
+colorlog==6.8.2
