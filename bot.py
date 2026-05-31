@@ -1,10 +1,9 @@
 """
-Colossus — Polymarket sports trade signal bot.
+Colossus — autonomous Polymarket sports trading bot.
 
-Scans sports markets every 60s, fires on 2+ triggers, sends Telegram alert
-with a direct link so you can execute on the Polymarket app.
-
-No private key required — works with email/Magic.link login.
+Uses API Key + Secret from polymarket.us/developer — no private key needed.
+Scans sports markets every 60s, fires on 2+ triggers, places up to $2 orders,
+monitors positions for TP/SL every 30 min. Telegram alerts throughout.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 from analyzer import evaluate_market
 from polymarket_client import PolymarketClient
+from position_manager import PositionManager
 
 load_dotenv()
 
@@ -59,14 +59,19 @@ def _require(name: str) -> str:
         sys.exit(1)
     return val
 
-TELEGRAM_TOKEN = _require("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT  = int(_require("TELEGRAM_CHAT_ID"))
+TELEGRAM_TOKEN   = _require("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT    = int(_require("TELEGRAM_CHAT_ID"))
+POLY_API_KEY     = _require("POLYMARKET_API_KEY")
+POLY_API_SECRET  = _require("POLYMARKET_API_SECRET")
+POLY_PASSPHRASE  = os.getenv("POLYMARKET_API_PASSPHRASE", "").strip()
 
-MAX_TRADE_USD  = float(os.getenv("MAX_TRADE_USD",  "2.00"))
-SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL",    "60"))
+MAX_TRADE_USD  = float(os.getenv("MAX_TRADE_USD",   "2.00"))
+TP_PCT         = float(os.getenv("TAKE_PROFIT_PCT", "10.0")) / 100
+SL_PCT         = float(os.getenv("STOP_LOSS_PCT",   "10.0")) / 100
+SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL",     "60"))
 
-# Deduplicate — don't re-alert the same market within a session
-_alerted_this_session: set[str] = set()
+# Deduplicate — don't re-enter the same market within a session
+_traded_this_session: set[str] = set()
 
 
 # ── Telegram helpers ──────────────────────────────────────────────────────────
@@ -83,7 +88,11 @@ async def _send(app: Application, text: str) -> None:
 
 # ── Core scan job ─────────────────────────────────────────────────────────────
 
-async def scan_markets(client: PolymarketClient, app: Application) -> None:
+async def scan_markets(
+    client: PolymarketClient,
+    app: Application,
+    position_mgr: PositionManager,
+) -> None:
     if os.getenv("PAUSED", "false").lower() == "true":
         logger.info("Bot paused — skipping scan")
         return
@@ -96,7 +105,7 @@ async def scan_markets(client: PolymarketClient, app: Application) -> None:
 
     for market in markets:
         mid = market.get("id") or market.get("conditionId") or ""
-        if mid in _alerted_this_session:
+        if mid in _traded_this_session:
             continue
 
         try:
@@ -109,28 +118,33 @@ async def scan_markets(client: PolymarketClient, app: Application) -> None:
             continue
 
         signals_fired += 1
-        _alerted_this_session.add(mid)
-
-        url = client.market_url(market)
+        _traded_this_session.add(mid)
 
         logger.info(
-            "SIGNAL: %s | %s @ %.2f | triggers=%s | score=%d",
+            "TRADE SIGNAL: %s | %s @ %.2f | triggers=%s | score=%d",
             signal.question[:60], signal.side, signal.price_now,
             signal.triggers, signal.score,
         )
 
+        resp = await client.place_market_order(
+            signal.token_id, "BUY", MAX_TRADE_USD
+        )
+
+        status = "✅ filled" if resp else "⚠️ failed"
         msg = (
-            f"🏆 *Trade Signal*\n"
+            f"🏆 *Trade Opened*\n"
             f"*{signal.question[:80]}*\n\n"
-            f"Recommended: *{signal.side}*\n"
-            f"Current price: {signal.price_now:.3f} ({signal.price_now*100:.1f}¢)\n"
-            f"Suggested amount: ${MAX_TRADE_USD:.2f}\n"
-            f"Event date: {signal.event_date}\n\n"
+            f"Side: `{signal.side}` @ {signal.price_now:.3f}\n"
+            f"Amount: ${MAX_TRADE_USD:.2f}\n"
+            f"Event date: {signal.event_date}\n"
             f"Triggers: {', '.join(signal.triggers)}\n"
-            f"Confidence: {signal.score}/100\n\n"
-            f"👉 [Open on Polymarket]({url})"
+            f"Score: {signal.score}/100\n"
+            f"Order: {status}"
         )
         await _send(app, msg)
+
+        if resp:
+            position_mgr.record_entry(signal.token_id, signal.price_now)
 
     if signals_fired == 0:
         logger.info("No signals this scan")
@@ -144,11 +158,27 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"*Colossus Status*\n"
         f"Time: {now}\n"
         f"Paused: {'yes' if os.getenv('PAUSED','false').lower()=='true' else 'no'}\n"
-        f"Suggested trade size: ${MAX_TRADE_USD:.2f}\n"
+        f"Max trade: ${MAX_TRADE_USD:.2f}\n"
+        f"TP: {TP_PCT:.0%} | SL: {SL_PCT:.0%}\n"
         f"Scan interval: {SCAN_INTERVAL}s\n"
-        f"Signals sent this session: {len(_alerted_this_session)}"
+        f"Traded markets this session: {len(_traded_this_session)}"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    client: PolymarketClient = ctx.bot_data["client"]
+    positions = await client.get_open_positions()
+    if not positions:
+        await update.message.reply_text("No open positions.")
+        return
+    lines = ["*Open Positions*\n"]
+    for p in positions[:10]:
+        tid  = (p.get("asset") or p.get("tokenId") or "")[:12]
+        size = p.get("size") or p.get("amount") or "?"
+        avg  = p.get("avgPrice") or p.get("average_price") or "?"
+        lines.append(f"• `{tid}…` size={size} avg={avg}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -166,23 +196,31 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def main() -> None:
     logger.info("Colossus starting up…")
 
-    session = aiohttp.ClientSession()
-    client  = PolymarketClient(session)
-    app     = Application.builder().token(TELEGRAM_TOKEN).build()
+    session    = aiohttp.ClientSession()
+    client     = PolymarketClient(session, POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE)
+    app        = Application.builder().token(TELEGRAM_TOKEN).build()
+    pos_mgr    = PositionManager(client, app, TELEGRAM_CHAT, TP_PCT, SL_PCT)
 
     app.bot_data["client"] = client
 
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("pause",  cmd_pause))
-    app.add_handler(CommandHandler("resume", cmd_resume))
+    app.add_handler(CommandHandler("status",    cmd_status))
+    app.add_handler(CommandHandler("positions", cmd_positions))
+    app.add_handler(CommandHandler("pause",     cmd_pause))
+    app.add_handler(CommandHandler("resume",    cmd_resume))
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         scan_markets,
         "interval",
         seconds = SCAN_INTERVAL,
-        args    = [client, app],
+        args    = [client, app, pos_mgr],
         id      = "scan",
+    )
+    scheduler.add_job(
+        pos_mgr.check_positions,
+        "interval",
+        minutes = 30,
+        id      = "positions",
     )
     scheduler.start()
 
@@ -192,10 +230,9 @@ async def main() -> None:
 
     await _send(app, (
         "🤖 *Colossus online*\n"
-        f"Scanning sports markets every {SCAN_INTERVAL}s\n"
-        f"Suggested trade size: ${MAX_TRADE_USD:.2f}\n\n"
-        "When a signal fires you'll get a direct link to execute on Polymarket.\n"
-        "Commands: /status /pause /resume"
+        f"Auto-trading · Scanning every {SCAN_INTERVAL}s\n"
+        f"TP {TP_PCT:.0%} · SL {SL_PCT:.0%} · Max ${MAX_TRADE_USD:.2f}/trade\n"
+        "Commands: /status /positions /pause /resume"
     ))
 
     logger.info("Bot running. Press Ctrl+C to stop.")

@@ -1,10 +1,11 @@
 """
-Polymarket API client — market data only.
-No private key required. Uses public APIs for market scanning and pricing.
+Polymarket API client — market data + trade execution via API keys.
+Uses Key ID + Secret from polymarket.us/developer (no private key needed).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 DATA_API  = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
+POLYGON_CHAIN_ID = 137
 
 # ── Hard-block keywords ──────────────────────────────────────────────────────
 
@@ -41,9 +43,39 @@ _ALLOWED_SPORTS = {
 
 
 class PolymarketClient:
-    def __init__(self, session: aiohttp.ClientSession) -> None:
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        api_key: str,
+        api_secret: str,
+        api_passphrase: str,
+    ) -> None:
         self._s = session
+        self._api_key        = api_key.strip()
+        self._api_secret     = api_secret.strip()
+        self._api_passphrase = api_passphrase.strip()
+        self._clob_client    = self._init_clob_client()
         self._market_cache: dict[str, dict] = {}
+
+    def _init_clob_client(self):
+        try:
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds
+            creds = ApiCreds(
+                api_key        = self._api_key,
+                api_secret     = self._api_secret,
+                api_passphrase = self._api_passphrase,
+            )
+            client = ClobClient(
+                host     = CLOB_API,
+                chain_id = POLYGON_CHAIN_ID,
+                creds    = creds,
+            )
+            logger.info("CLOB client initialised with API key %s…", self._api_key[:8])
+            return client
+        except Exception as exc:
+            logger.error("Failed to init CLOB client: %s", exc)
+            return None
 
     # ---------------------------------------------------------------- #
     # Core HTTP                                                         #
@@ -137,7 +169,71 @@ class PolymarketClient:
         return None
 
     # ---------------------------------------------------------------- #
-    # Token ID / market helpers                                         #
+    # Trade execution                                                   #
+    # ---------------------------------------------------------------- #
+
+    async def place_market_order(
+        self, token_id: str, side: str, amount_usd: float
+    ) -> dict | None:
+        if not self._clob_client:
+            logger.error("CLOB client not initialised — cannot place order")
+            return None
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(
+                None, self._sync_market_order, token_id, side, amount_usd
+            )
+            return result
+        except Exception as exc:
+            logger.error("Order placement failed: %s", exc)
+            return None
+
+    def _sync_market_order(self, token_id: str, side: str, amount_usd: float) -> dict | None:
+        from py_clob_client.clob_types import MarketOrderArgs, OrderType, BUY, SELL
+        s = BUY if side == "BUY" else SELL
+        args = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=s)
+        signed = self._clob_client.create_market_order(args)
+        resp   = self._clob_client.post_order(signed, OrderType.FOK)
+        logger.info("Order response: %s", resp)
+        return resp
+
+    async def close_position(self, token_id: str, size: float) -> dict | None:
+        if not self._clob_client:
+            return None
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(
+                None, self._sync_close_position, token_id, size
+            )
+        except Exception as exc:
+            logger.error("Close position failed: %s", exc)
+            return None
+
+    def _sync_close_position(self, token_id: str, size: float) -> dict | None:
+        from py_clob_client.clob_types import MarketOrderArgs, OrderType, SELL
+        args   = MarketOrderArgs(token_id=token_id, amount=size, side=SELL)
+        signed = self._clob_client.create_market_order(args)
+        return self._clob_client.post_order(signed, OrderType.FOK)
+
+    # ---------------------------------------------------------------- #
+    # Open positions                                                    #
+    # ---------------------------------------------------------------- #
+
+    async def get_open_positions(self) -> list[dict]:
+        if not self._clob_client:
+            return []
+        loop = asyncio.get_event_loop()
+        try:
+            data = await loop.run_in_executor(None, self._clob_client.get_positions)
+            if not data:
+                return []
+            return data if isinstance(data, list) else data.get("data", [])
+        except Exception as exc:
+            logger.debug("get_open_positions failed: %s", exc)
+            return []
+
+    # ---------------------------------------------------------------- #
+    # Helpers                                                           #
     # ---------------------------------------------------------------- #
 
     def resolve_token_id(self, market: dict, side: str) -> str | None:
