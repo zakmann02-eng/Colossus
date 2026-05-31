@@ -61,9 +61,7 @@ def _require(name: str) -> str:
 
 TELEGRAM_TOKEN   = _require("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT    = int(_require("TELEGRAM_CHAT_ID"))
-POLY_API_KEY     = _require("POLYMARKET_API_KEY")
-POLY_API_SECRET  = _require("POLYMARKET_API_SECRET")
-POLY_PASSPHRASE  = os.getenv("POLYMARKET_API_PASSPHRASE", "").strip()
+PRIVATE_KEY      = _require("POLYMARKET_PRIVATE_KEY")
 
 MAX_TRADE_USD  = float(os.getenv("MAX_TRADE_USD",   "2.00"))
 TP_PCT         = float(os.getenv("TAKE_PROFIT_PCT", "10.0")) / 100
@@ -197,7 +195,7 @@ async def main() -> None:
     logger.info("Colossus starting up…")
 
     session    = aiohttp.ClientSession()
-    client     = PolymarketClient(session, POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE)
+    client     = PolymarketClient(session, PRIVATE_KEY)
     app        = Application.builder().token(TELEGRAM_TOKEN).build()
     pos_mgr    = PositionManager(client, app, TELEGRAM_CHAT, TP_PCT, SL_PCT)
 

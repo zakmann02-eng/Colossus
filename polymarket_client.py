@@ -1,6 +1,6 @@
 """
-Polymarket API client — market data + trade execution via API keys.
-Uses Key ID + Secret from polymarket.us/developer (no private key needed).
+Polymarket API client — market data + trade execution.
+Uses wallet private key (MetaMask) for order signing via py-clob-client.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
+from eth_account import Account
 
 logger = logging.getLogger(__name__)
 
@@ -43,35 +44,32 @@ _ALLOWED_SPORTS = {
 
 
 class PolymarketClient:
-    def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        api_key: str,
-        api_secret: str,
-        api_passphrase: str,
-    ) -> None:
+    def __init__(self, session: aiohttp.ClientSession, private_key: str) -> None:
         self._s = session
-        self._api_key        = api_key.strip()
-        self._api_secret     = api_secret.strip()
-        self._api_passphrase = api_passphrase.strip()
-        self._clob_client    = self._init_clob_client()
+        pk = private_key.strip()
+        if pk and not pk.startswith("0x"):
+            pk = "0x" + pk
+        self._private_key = pk
+        try:
+            self._address = Account.from_key(self._private_key).address.lower()
+        except Exception as exc:
+            raise ValueError(
+                f"POLYMARKET_PRIVATE_KEY is invalid: {exc}\n"
+                "Export your 64-character hex key from MetaMask → Account Details → Show private key."
+            ) from exc
+        self._clob_client = self._init_clob_client()
         self._market_cache: dict[str, dict] = {}
 
     def _init_clob_client(self):
         try:
             from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
-            creds = ApiCreds(
-                api_key        = self._api_key,
-                api_secret     = self._api_secret,
-                api_passphrase = self._api_passphrase,
-            )
             client = ClobClient(
                 host     = CLOB_API,
+                key      = self._private_key,
                 chain_id = POLYGON_CHAIN_ID,
-                creds    = creds,
             )
-            logger.info("CLOB client initialised with API key %s…", self._api_key[:8])
+            client.set_api_creds(client.create_or_derive_api_creds())
+            logger.info("CLOB client initialised — wallet %s…", self._address[:10])
             return client
         except Exception as exc:
             logger.error("Failed to init CLOB client: %s", exc)
