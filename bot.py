@@ -62,7 +62,7 @@ def _require(name: str) -> str:
 
 TELEGRAM_TOKEN = _require("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT  = int(_require("TELEGRAM_CHAT_ID"))
-PRIVATE_KEY    = _require("POLYMARKET_PRIVATE_KEY")
+PRIVATE_KEY    = _require("POLYMARKET_PRIVATE_KEY").strip()
 
 MAX_TRADE_USD  = float(os.getenv("MAX_TRADE_USD",   "2.00"))
 TP_PCT         = float(os.getenv("TAKE_PROFIT_PCT", "10.0")) / 100
