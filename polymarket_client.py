@@ -46,8 +46,18 @@ _ALLOWED_SPORTS = {
 class PolymarketClient:
     def __init__(self, session: aiohttp.ClientSession, private_key: str) -> None:
         self._s = session
-        self._private_key = private_key
-        self._address = Account.from_key(private_key).address.lower()
+        self._private_key = private_key.strip()
+        # Ensure 0x prefix
+        if self._private_key and not self._private_key.startswith("0x"):
+            self._private_key = "0x" + self._private_key
+        try:
+            self._address = Account.from_key(self._private_key).address.lower()
+        except Exception as exc:
+            raise ValueError(
+                f"POLYMARKET_PRIVATE_KEY is invalid: {exc}\n"
+                "It must be a 64-character hex string (your Polygon/MetaMask private key). "
+                "Do NOT use a seed phrase."
+            ) from exc
         self._clob_client = self._init_clob_client()
         self._market_cache: dict[str, dict] = {}
 
