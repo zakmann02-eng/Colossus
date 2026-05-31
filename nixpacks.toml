@@ -5,4 +5,4 @@ nixPkgs = ["python312", "python312Packages.pip"]
 cmds = ["pip install --break-system-packages -r requirements.txt"]
 
 [start]
-cmd = "python main.py"
+cmd = "python bot.py"
