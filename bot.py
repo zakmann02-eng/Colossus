@@ -62,7 +62,7 @@ def _require(name: str) -> str:
 
 TELEGRAM_TOKEN   = _require("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT    = int(_require("TELEGRAM_CHAT_ID"))
-PRIVATE_KEY      = _require("POLYMARKET_PRIVATE_KEY")
+PRIVATE_KEY      = os.getenv("POLYMARKET_PRIVATE_KEY", "").strip()
 
 MIN_TRADE_USD  = float(os.getenv("MIN_TRADE_USD",   "0.10"))
 MAX_TRADE_USD  = float(os.getenv("MAX_TRADE_USD",   "2.00"))
@@ -202,10 +202,24 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def main() -> None:
     logger.info("Colossus starting up…")
 
-    session    = aiohttp.ClientSession()
-    client     = PolymarketClient(session, PRIVATE_KEY)
-    app        = Application.builder().token(TELEGRAM_TOKEN).build()
-    pos_mgr    = PositionManager(client, app, TELEGRAM_CHAT, TP_PCT, SL_PCT)
+    session = aiohttp.ClientSession()
+    try:
+        client = PolymarketClient(session, PRIVATE_KEY)
+        trading_enabled = client._clob_client is not None
+    except ValueError as exc:
+        logger.warning("No valid private key — running in signal-alert mode. %s", exc)
+        from polymarket_client import PolymarketClient as _PC
+        # Re-init without attempting key derivation by passing empty key handled below
+        client = _PC.__new__(_PC)
+        client._s = session
+        client._private_key = ""
+        client._address = ""
+        client._clob_client = None
+        client._market_cache = {}
+        trading_enabled = False
+
+    app     = Application.builder().token(TELEGRAM_TOKEN).build()
+    pos_mgr = PositionManager(client, app, TELEGRAM_CHAT, TP_PCT, SL_PCT)
 
     app.bot_data["client"] = client
 
@@ -234,10 +248,12 @@ async def main() -> None:
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
+    mode = "Auto-trading" if trading_enabled else "Signal-alert mode (no private key)"
     await _send(app, (
-        "🤖 *Colossus online*\n"
-        f"Auto-trading · Scanning every {SCAN_INTERVAL}s\n"
-        f"TP {TP_PCT:.0%} · SL {SL_PCT:.0%} · Max ${MAX_TRADE_USD:.2f}/trade\n"
+        f"🤖 *Colossus online*\n"
+        f"Mode: {mode}\n"
+        f"Scanning every {SCAN_INTERVAL}s · TP {TP_PCT:.0%} · SL {SL_PCT:.0%}\n"
+        f"Trade range: ${MIN_TRADE_USD:.2f}–${MAX_TRADE_USD:.2f}\n"
         "Commands: /status /positions /pause /resume"
     ))
 
