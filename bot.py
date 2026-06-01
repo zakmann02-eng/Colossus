@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import sys
 from datetime import datetime, timezone
 
@@ -63,10 +64,16 @@ TELEGRAM_TOKEN   = _require("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT    = int(_require("TELEGRAM_CHAT_ID"))
 PRIVATE_KEY      = _require("POLYMARKET_PRIVATE_KEY")
 
+MIN_TRADE_USD  = float(os.getenv("MIN_TRADE_USD",   "0.10"))
 MAX_TRADE_USD  = float(os.getenv("MAX_TRADE_USD",   "2.00"))
 TP_PCT         = float(os.getenv("TAKE_PROFIT_PCT", "10.0")) / 100
 SL_PCT         = float(os.getenv("STOP_LOSS_PCT",   "10.0")) / 100
 SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL",     "60"))
+
+
+def _trade_amount() -> float:
+    """Pick a random amount between MIN and MAX, rounded to 2 decimal places."""
+    return round(random.uniform(MIN_TRADE_USD, MAX_TRADE_USD), 2)
 
 # Deduplicate — don't re-enter the same market within a session
 _traded_this_session: set[str] = set()
@@ -124,8 +131,9 @@ async def scan_markets(
             signal.triggers, signal.score,
         )
 
+        amount = _trade_amount()
         resp = await client.place_market_order(
-            signal.token_id, "BUY", MAX_TRADE_USD
+            signal.token_id, "BUY", amount
         )
 
         status = "✅ filled" if resp else "⚠️ failed"
@@ -133,7 +141,7 @@ async def scan_markets(
             f"🏆 *Trade Opened*\n"
             f"*{signal.question[:80]}*\n\n"
             f"Side: `{signal.side}` @ {signal.price_now:.3f}\n"
-            f"Amount: ${MAX_TRADE_USD:.2f}\n"
+            f"Amount: ${amount:.2f}\n"
             f"Event date: {signal.event_date}\n"
             f"Triggers: {', '.join(signal.triggers)}\n"
             f"Score: {signal.score}/100\n"
@@ -156,7 +164,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"*Colossus Status*\n"
         f"Time: {now}\n"
         f"Paused: {'yes' if os.getenv('PAUSED','false').lower()=='true' else 'no'}\n"
-        f"Max trade: ${MAX_TRADE_USD:.2f}\n"
+        f"Trade range: ${MIN_TRADE_USD:.2f} – ${MAX_TRADE_USD:.2f}\n"
         f"TP: {TP_PCT:.0%} | SL: {SL_PCT:.0%}\n"
         f"Scan interval: {SCAN_INTERVAL}s\n"
         f"Traded markets this session: {len(_traded_this_session)}"
