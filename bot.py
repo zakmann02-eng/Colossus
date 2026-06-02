@@ -125,15 +125,8 @@ async def scan_markets(
         signals_fired += 1
         _traded_this_session.add(mid)
 
-        logger.info(
-            "TRADE SIGNAL: %s | %s @ %.2f | triggers=%s | score=%d",
-            signal.question[:60], signal.side, signal.price_now,
-            signal.triggers, signal.score,
-        )
-
-        amount = _trade_amount()
         resp = await client.place_market_order(
-            signal.token_id, "BUY", amount
+            signal.token_id, "BUY", signal.amount_usd
         )
 
         status = "✅ filled" if resp else "⚠️ failed"
@@ -141,7 +134,8 @@ async def scan_markets(
             f"🏆 *Trade Opened*\n"
             f"*{signal.question[:80]}*\n\n"
             f"Side: `{signal.side}` @ {signal.price_now:.3f}\n"
-            f"Amount: ${amount:.2f}\n"
+            f"Amount: ${signal.amount_usd:.2f} ({signal.conviction} conviction)\n"
+            f"TP: {signal.tp_pct:.0%} · SL: {signal.sl_pct:.0%}\n"
             f"Event date: {signal.event_date}\n"
             f"Triggers: {', '.join(signal.triggers)}\n"
             f"Score: {signal.score}/100\n"
@@ -150,7 +144,10 @@ async def scan_markets(
         await _send(app, msg)
 
         if resp:
-            position_mgr.record_entry(signal.token_id, signal.price_now)
+            position_mgr.record_entry(
+                signal.token_id, signal.price_now,
+                signal.tp_pct, signal.sl_pct
+            )
 
     if signals_fired == 0:
         logger.info("No signals this scan")

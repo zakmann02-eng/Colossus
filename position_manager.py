@@ -1,10 +1,12 @@
 """
-TP / SL monitor — checks open positions every 30 minutes and closes at ±10%.
+TP / SL monitor — checks open positions every 5 minutes.
+TP and SL thresholds are per-trade based on conviction level.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -13,39 +15,47 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-TAKE_PROFIT_DEFAULT = 0.10   # +10 %
-STOP_LOSS_DEFAULT   = 0.10   # −10 %
+
+@dataclass
+class _Entry:
+    price: float
+    tp:    float   # take profit %
+    sl:    float   # stop loss %
 
 
 class PositionManager:
     def __init__(
         self,
         client: "PolymarketClient",
-        app: "Application",  # telegram Application, for sending messages
+        app: "Application",
         chat_id: int,
-        tp_pct: float = TAKE_PROFIT_DEFAULT,
-        sl_pct: float = STOP_LOSS_DEFAULT,
+        default_tp: float = 0.10,
+        default_sl: float = 0.10,
     ) -> None:
-        self._client   = client
-        self._app      = app
-        self._chat_id  = chat_id
-        self._tp       = tp_pct
-        self._sl       = sl_pct
+        self._client     = client
+        self._app        = app
+        self._chat_id    = chat_id
+        self._default_tp = default_tp
+        self._default_sl = default_sl
+        self._entries: dict[str, _Entry] = {}
 
-        # token_id → entry_price  (populated when we open a trade)
-        self._entries: dict[str, float] = {}
-
-    # ------------------------------------------------------------------ #
-    # Called by bot.py when a trade is opened                             #
-    # ------------------------------------------------------------------ #
-
-    def record_entry(self, token_id: str, entry_price: float) -> None:
-        self._entries[token_id] = entry_price
-        logger.debug("Recorded entry %s @ %.4f", token_id[:12], entry_price)
-
-    # ------------------------------------------------------------------ #
-    # Scheduled job — runs every 30 min                                   #
-    # ------------------------------------------------------------------ #
+    def record_entry(
+        self,
+        token_id: str,
+        entry_price: float,
+        tp_pct: float | None = None,
+        sl_pct: float | None = None,
+    ) -> None:
+        self._entries[token_id] = _Entry(
+            price = entry_price,
+            tp    = tp_pct if tp_pct is not None else self._default_tp,
+            sl    = sl_pct if sl_pct is not None else self._default_sl,
+        )
+        logger.debug(
+            "Entry %s @ %.4f | TP=%.0f%% SL=%.0f%%",
+            token_id[:12], entry_price, self._entries[token_id].tp * 100,
+            self._entries[token_id].sl * 100,
+        )
 
     async def check_positions(self) -> None:
         positions = await self._client.get_open_positions()
@@ -67,26 +77,29 @@ class PositionManager:
             if current is None:
                 continue
 
-            entry = self._entries.get(token_id)
-            if entry is None:
-                # Position not tracked in this session — use avg_price if available
+            entry_obj = self._entries.get(token_id)
+            if entry_obj is None:
                 avg_raw = pos.get("avgPrice") or pos.get("average_price")
                 if avg_raw:
-                    entry = float(avg_raw)
-                    self._entries[token_id] = entry
+                    entry_obj = _Entry(
+                        price = float(avg_raw),
+                        tp    = self._default_tp,
+                        sl    = self._default_sl,
+                    )
+                    self._entries[token_id] = entry_obj
                 else:
                     continue
 
-            pnl_pct = (current - entry) / entry
+            pnl_pct = (current - entry_obj.price) / entry_obj.price
 
-            if pnl_pct >= self._tp:
-                await self._close_and_alert(token_id, size, entry, current, "TAKE PROFIT", pnl_pct)
-            elif pnl_pct <= -self._sl:
-                await self._close_and_alert(token_id, size, entry, current, "STOP LOSS", pnl_pct)
-
-    # ------------------------------------------------------------------ #
-    # Internal                                                            #
-    # ------------------------------------------------------------------ #
+            if pnl_pct >= entry_obj.tp:
+                await self._close_and_alert(
+                    token_id, size, entry_obj.price, current, "TAKE PROFIT", pnl_pct, entry_obj
+                )
+            elif pnl_pct <= -entry_obj.sl:
+                await self._close_and_alert(
+                    token_id, size, entry_obj.price, current, "STOP LOSS", pnl_pct, entry_obj
+                )
 
     async def _close_and_alert(
         self,
@@ -96,6 +109,7 @@ class PositionManager:
         current: float,
         reason: str,
         pnl_pct: float,
+        entry_obj: _Entry,
     ) -> None:
         resp = await self._client.close_position(token_id, size)
         self._entries.pop(token_id, None)
@@ -107,6 +121,7 @@ class PositionManager:
             f"Token: `{token_id[:12]}…`\n"
             f"Entry: {entry:.3f} → Exit: {current:.3f}\n"
             f"P&L: {pnl_pct:+.1%}\n"
+            f"Target was: TP {entry_obj.tp:.0%} / SL {entry_obj.sl:.0%}\n"
             f"Close order: {status}"
         )
         try:
@@ -118,4 +133,7 @@ class PositionManager:
         except Exception as exc:
             logger.error("Telegram send failed: %s", exc)
 
-        logger.info("%s token=%s pnl=%.2f%% close=%s", reason, token_id[:12], pnl_pct * 100, status)
+        logger.info(
+            "%s token=%s pnl=%.2f%% close=%s",
+            reason, token_id[:12], pnl_pct * 100, status,
+        )
