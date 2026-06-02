@@ -239,7 +239,7 @@ async def main() -> None:
     scheduler.add_job(
         pos_mgr.check_positions,
         "interval",
-        minutes = 30,
+        minutes = 5,
         id      = "positions",
     )
     scheduler.start()
