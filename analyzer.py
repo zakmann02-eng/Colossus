@@ -10,7 +10,7 @@ Pre-filters (all must pass):
   T1  Price outside 30-70% range (meaningful edge, not coin-flip)
   T2  Price moved >= 3% in last 15 min (momentum / live action)
   T3  24-h volume > 1.5x market daily average (crowd interest spike)
-  T4  Resolves within 7 days (active or imminent event)
+  T4  Resolves within 7 days — weekly/daily trading focus
 
 Position sizing by conviction (triggers fired):
   2 triggers → low  → $0.10–$0.50
@@ -42,11 +42,11 @@ MIN_VOL_24H  = 100.0
 MAX_DAYS_OUT = 30 * 86_400
 
 # ── Trigger thresholds ────────────────────────────────────────────────────────
-T1_LOW  = 0.45  
-T1_HIGH = 0.55   
+T1_LOW  = 0.48  
+T1_HIGH = 0.52   
 T2_MOVE = 0.01
 T3_MULT = 1.5
-T4_SECS = 30 * 86_400
+T4_SECS = 7 * 86_400
 
 # ── Conviction tiers (keyed by number of triggers fired) ─────────────────────
 _TIERS = {
