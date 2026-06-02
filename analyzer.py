@@ -3,7 +3,7 @@ Trigger evaluation and trade decision logic.
 
 Pre-filters (all must pass):
   - Price between 0.05 and 0.95 (not a near-decided market)
-  - Minimum 24h volume of $500 (ensures real liquidity)
+  - Minimum 24h volume of $50 (ensures real liquidity)
   - Must resolve within 30 days (eliminates far-future speculation)
 
 4 triggers — at least 2 must fire:
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ── Pre-filters ───────────────────────────────────────────────────────────────
 MIN_PRICE     = 0.05           # skip near-zero outcomes
 MAX_PRICE     = 0.95           # skip near-certain outcomes
-MIN_VOL_24H   = 500.0          # minimum $500 24h volume (real liquidity)
+MIN_VOL_24H   = 50.0           # minimum $50 24h volume (real liquidity)
 MAX_DAYS_OUT  = 30 * 86_400    # must resolve within 30 days
 
 # ── Trigger thresholds ────────────────────────────────────────────────────────
