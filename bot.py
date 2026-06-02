@@ -62,7 +62,9 @@ def _require(name: str) -> str:
 
 TELEGRAM_TOKEN   = _require("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT    = int(_require("TELEGRAM_CHAT_ID"))
-PRIVATE_KEY      = os.getenv("POLYMARKET_PRIVATE_KEY", "").strip()
+POLY_API_KEY     = _require("POLYMARKET_API_KEY")
+POLY_API_SECRET  = _require("POLYMARKET_API_SECRET")
+POLY_PASSPHRASE  = os.getenv("POLYMARKET_API_PASSPHRASE", "").strip()
 
 MIN_TRADE_USD  = float(os.getenv("MIN_TRADE_USD",   "0.10"))
 MAX_TRADE_USD  = float(os.getenv("MAX_TRADE_USD",   "2.00"))
@@ -200,20 +202,8 @@ async def main() -> None:
     logger.info("Colossus starting up…")
 
     session = aiohttp.ClientSession()
-    try:
-        client = PolymarketClient(session, PRIVATE_KEY)
-        trading_enabled = client._clob_client is not None
-    except ValueError as exc:
-        logger.warning("No valid private key — running in signal-alert mode. %s", exc)
-        from polymarket_client import PolymarketClient as _PC
-        # Re-init without attempting key derivation by passing empty key handled below
-        client = _PC.__new__(_PC)
-        client._s = session
-        client._private_key = ""
-        client._address = ""
-        client._clob_client = None
-        client._market_cache = {}
-        trading_enabled = False
+    client = PolymarketClient(session, POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE)
+trading_enabled = client._clob_client is not None
 
     app     = Application.builder().token(TELEGRAM_TOKEN).build()
     pos_mgr = PositionManager(client, app, TELEGRAM_CHAT, TP_PCT, SL_PCT)
