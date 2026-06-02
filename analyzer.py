@@ -42,11 +42,11 @@ MIN_VOL_24H  = 100.0
 MAX_DAYS_OUT = 30 * 86_400
 
 # ── Trigger thresholds ────────────────────────────────────────────────────────
-T1_LOW  = 0.40  
-T1_HIGH = 0.60   
-T2_MOVE = 0.03
+T1_LOW  = 0.45  
+T1_HIGH = 0.55   
+T2_MOVE = 0.01
 T3_MULT = 1.5
-T4_SECS = 14 * 86_400
+T4_SECS = 30 * 86_400
 
 # ── Conviction tiers (keyed by number of triggers fired) ─────────────────────
 _TIERS = {
