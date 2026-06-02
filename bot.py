@@ -203,7 +203,7 @@ async def main() -> None:
 
     session = aiohttp.ClientSession()
     client = PolymarketClient(session, POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE)
-trading_enabled = client._clob_client is not None
+    trading_enabled = client._clob_client is not None
 
     app     = Application.builder().token(TELEGRAM_TOKEN).build()
     pos_mgr = PositionManager(client, app, TELEGRAM_CHAT, TP_PCT, SL_PCT)
