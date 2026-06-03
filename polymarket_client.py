@@ -98,6 +98,8 @@ class PolymarketClient:
         return [m for m in markets if self._is_allowed(m)]
 
     def _is_allowed(self, market):
+        if not market.get("active", True) or market.get("closed", False):
+            return False
         text = " ".join([
             (market.get("question") or "").lower(),
             (market.get("title") or "").lower(),
@@ -155,6 +157,17 @@ class PolymarketClient:
         except Exception as exc:
             logger.debug("get_open_positions failed: %s", exc)
             return []
+
+    async def get_balance(self) -> float:
+        path = "/balance"
+        headers = _l1_headers(self._api_key, self._api_secret, self._api_passphrase, "GET", path)
+        try:
+            async with self._s.get(f"{CLOB_API}{path}", headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                data = await r.json()
+                return float(data.get("balance") or data.get("amount") or 0)
+        except Exception as exc:
+            logger.debug("get_balance failed: %s", exc)
+            return 0.0
 
     async def place_market_order(self, token_id, side, amount_usd):
         if self._clob_client:
