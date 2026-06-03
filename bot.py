@@ -128,6 +128,11 @@ async def scan_markets(
         if signal is None:
             continue
 
+             balance = await client.get_balance()
+        if balance < signal.amount_usd:
+            logger.info("Insufficient balance ($%.2f) for $%.2f trade — stopping", balance, signal.amount_usd)
+            break
+
         signals_fired += 1
         _traded_this_session.add(mid)
 
