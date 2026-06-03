@@ -121,7 +121,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
 
-    if 0 < secs <= T4_SECS:
+    if secs is not None and 0 < secs <= T4_SECS:
         triggers.append(f"T4:days={secs/86400:.1f}")
 
     if not triggers:
