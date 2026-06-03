@@ -74,7 +74,6 @@ SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL",     "60"))
 
 
 def _trade_amount() -> float:
-    """Pick a random amount between MIN and MAX, rounded to 2 decimal places."""
     return round(random.uniform(MIN_TRADE_USD, MAX_TRADE_USD), 2)
 
 # Deduplicate — don't re-enter the same market within a session
@@ -105,6 +104,11 @@ async def scan_markets(
         return
 
     logger.info("Scanning sports markets…")
+    balance = await client.get_balance()
+    if balance < MIN_TRADE_USD:
+        logger.info("Insufficient balance ($%.2f) — skipping trades", balance)
+        return
+
     markets = await client.get_sports_markets(limit=200)
     logger.info("Found %d eligible markets", len(markets))
 
