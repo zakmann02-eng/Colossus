@@ -90,7 +90,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         return None
 
     secs = client.seconds_to_resolution(market)
-    if secs is None or secs <= 0 or secs > MAX_DAYS_OUT:
+    if secs is not None and (secs <= 0 or secs > MAX_DAYS_OUT):
         return None
 
     vol_24h = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
