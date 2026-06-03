@@ -87,21 +87,26 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
 
     token_id = client.resolve_token_id(market, "YES")
     if not token_id:
+        logger.info("SKIP no-token: %s", question[:60])
         return None
 
     secs = client.seconds_to_resolution(market)
     if secs is not None and (secs <= 0 or secs > MAX_DAYS_OUT):
+        logger.info("SKIP time(%.1fd): %s", secs/86400, question[:60])
         return None
 
     vol_24h = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
     if vol_24h < MIN_VOL_24H:
+        logger.info("SKIP low-vol($%.0f): %s", vol_24h, question[:60])
         return None
 
     price = await client.get_current_price(token_id)
     if not price:
+        logger.info("SKIP no-price: %s", question[:60])
         return None
 
     if price < MIN_PRICE or price > MAX_PRICE:
+        logger.info("SKIP price(%.3f): %s", price, question[:60])
         return None
 
     triggers: list[str] = []
@@ -125,6 +130,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         triggers.append(f"T4:days={secs/86400:.1f}")
 
     if not triggers:
+        logger.info("SKIP no-triggers: %s", question[:60])
         return None
 
     side               = _decide_side(price)
