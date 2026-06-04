@@ -98,7 +98,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         return None
 
     vol_24h = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
-    if vol_24h < MIN_VOL_24H:
+    if vol_24h > 0 and vol_24h < MIN_VOL_24H:
         return None
 
     price = await client.get_market_price(market, token_id)
