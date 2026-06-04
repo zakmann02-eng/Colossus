@@ -104,6 +104,8 @@ class PolymarketClient:
                 if sub:
                     for m in sub:
                         row = {**event, **m}
+                        row["active"]      = event.get("active", True)
+                        row["closed"]      = False
                         row["slug"]        = m.get("slug") or event_slug
                         row["eventSlug"]   = event_slug
                         row["question"]    = m.get("question") or m.get("title") or event.get("title") or ""
@@ -124,6 +126,7 @@ class PolymarketClient:
 
     def _is_allowed(self, market):
         if not market.get("active", True) or market.get("closed", False):
+            logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
         text = " ".join([
             (market.get("question") or "").lower(),
@@ -137,6 +140,7 @@ class PolymarketClient:
         ])
         for kw in _BLOCKED:
             if kw in text:
+                logger.debug("BLOCKED keyword '%s': %s", kw, text[:80])
                 return False
         return True
 
