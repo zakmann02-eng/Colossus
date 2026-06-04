@@ -133,7 +133,12 @@ class PolymarketClient:
             logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
         # Skip completed/final games
-        event_state = (market.get("eventState") or "").upper()
+        event_state_raw = market.get("eventState")
+        if event_state_raw and not isinstance(event_state_raw, str):
+            logger.info("eventState raw: %s", event_state_raw)
+            event_state = str(event_state_raw.get("status") or event_state_raw.get("state") or "").upper()
+        else:
+            event_state = str(event_state_raw or "").upper()
         if event_state in ("FINAL", "COMPLETED", "POST_GAME", "POSTGAME", "ENDED", "RESOLVED"):
             return False
         if event_state:
