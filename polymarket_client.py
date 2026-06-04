@@ -115,8 +115,7 @@ class PolymarketClient:
                         row["question"]    = m.get("question") or m.get("title") or event.get("title") or ""
                         row["volume24hr"]  = event.get("volume24hr") or m.get("volume24hr") or 0
                         row["resolutionTime"] = (
-                            m.get("resolutionTime") or m.get("endDate")
-                            or event.get("endDate") or event.get("resolutionTime") or ""
+                            m.get("resolutionTime") or event.get("resolutionTime") or ""
                         )
                         markets.append(row)
                 else:
