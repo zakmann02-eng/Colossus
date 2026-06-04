@@ -1,28 +1,22 @@
 """
 Polymarket API client — market data + trade execution.
-Uses API Key + Secret from polymarket.us/developer for authenticated trading.
+Uses polymarket-us SDK for authenticated trading on Polymarket.US.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
-import hmac
 import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
 
-DATA_API  = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
-POLYGON_CHAIN_ID = 137
 
 _BLOCKED = {
     "politics", "election", "president", "congress", "senate",
@@ -33,41 +27,26 @@ _BLOCKED = {
 }
 
 
-def _l1_headers(api_key, secret, passphrase, method, path, body=""):
-    timestamp = str(int(time.time()))
-    message   = timestamp + method.upper() + path + body
-    signature = base64.b64encode(
-        hmac.new(secret.encode(), message.encode(), hashlib.sha256).digest()
-    ).decode()
-    return {
-        "POLY-API-KEY":    api_key,
-        "POLY-SIGNATURE":  signature,
-        "POLY-TIMESTAMP":  timestamp,
-        "POLY-PASSPHRASE": passphrase,
-        "Content-Type":    "application/json",
-    }
-
-
 class PolymarketClient:
-    def __init__(self, session, api_key, api_secret, api_passphrase):
-        self._s              = session
-        self._api_key        = api_key.strip()
-        self._api_secret     = api_secret.strip()
-        self._api_passphrase = api_passphrase.strip()
-        self._clob_client    = self._init_clob_client()
-        self._market_cache   = {}
-        logger.info("PolymarketClient ready — API key %s…", self._api_key[:8])
+    def __init__(self, session, key_id: str, secret_key: str) -> None:
+        self._s          = session
+        self._key_id     = key_id.strip()
+        self._secret_key = secret_key.strip()
+        self._us_client  = self._init_us_client()
+        self._market_cache: dict = {}
+        logger.info("PolymarketClient ready — key_id %s…", self._key_id[:8])
 
-    def _init_clob_client(self):
+    def _init_us_client(self):
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
-            creds = ApiCreds(api_key=self._api_key, api_secret=self._api_secret, api_passphrase=self._api_passphrase)
-            client = ClobClient(host=CLOB_API, chain_id=POLYGON_CHAIN_ID, creds=creds)
-            logger.info("CLOB client initialised with API key %s…", self._api_key[:8])
+            from polymarket_us import PolymarketUS
+            client = PolymarketUS(
+                key_id=self._key_id,
+                secret_key=self._secret_key,
+            )
+            logger.info("Polymarket.US client initialised — key_id %s…", self._key_id[:8])
             return client
         except Exception as exc:
-            logger.error("Failed to init CLOB client: %s", exc)
+            logger.error("Failed to init Polymarket.US client: %s", exc)
             return None
 
     async def _get(self, url, params=None):
@@ -79,21 +58,12 @@ class PolymarketClient:
             logger.debug("GET %s failed: %s", url, exc)
             return None
 
-    async def _post(self, path, body):
-        body_str = json.dumps(body)
-        headers  = _l1_headers(self._api_key, self._api_secret, self._api_passphrase, "POST", path, body_str)
-        try:
-            async with self._s.post(f"{CLOB_API}{path}", data=body_str, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                resp = await r.json()
-                if r.status not in (200, 201):
-                    logger.error("POST %s → %s: %s", path, r.status, resp)
-                return resp
-        except Exception as exc:
-            logger.error("POST %s failed: %s", path, exc)
-            return None
-
     async def get_sports_markets(self, limit=200):
-        data = await self._get(f"{GAMMA_API}/markets", params={"active": "true", "closed": "false", "limit": limit, "order": "volume24hr", "ascending": "false"})
+        data = await self._get(
+            f"{GAMMA_API}/markets",
+            params={"active": "true", "closed": "false", "limit": limit,
+                    "order": "volume24hr", "ascending": "false"},
+        )
         markets = data if isinstance(data, list) else (data or {}).get("data", []) if data else []
         return [m for m in markets if self._is_allowed(m)]
 
@@ -104,7 +74,11 @@ class PolymarketClient:
             (market.get("question") or "").lower(),
             (market.get("title") or "").lower(),
             (market.get("category") or "").lower(),
-            " ".join(t.lower() if isinstance(t, str) else (t.get("label") or t.get("name") or "").lower() for t in (market.get("tags") or [])),
+            " ".join(
+                t.lower() if isinstance(t, str)
+                else (t.get("label") or t.get("name") or "").lower()
+                for t in (market.get("tags") or [])
+            ),
         ])
         for kw in _BLOCKED:
             if kw in text:
@@ -112,11 +86,17 @@ class PolymarketClient:
         return True
 
     async def get_price_15min_ago(self, market, token_id):
-        now = int(time.time())
+        now   = int(time.time())
         start = now - 20 * 60
-        data = await self._get(f"{CLOB_API}/prices-history", params={"tokenId": token_id, "startTs": start, "endTs": now, "fidelity": 1})
+        data  = await self._get(
+            f"{CLOB_API}/prices-history",
+            params={"tokenId": token_id, "startTs": start, "endTs": now, "fidelity": 1},
+        )
         if not data:
-            data = await self._get(f"{CLOB_API}/prices-history", params={"market": market.get("id", ""), "startTs": start, "endTs": now, "fidelity": 1})
+            data = await self._get(
+                f"{CLOB_API}/prices-history",
+                params={"market": market.get("id", ""), "startTs": start, "endTs": now, "fidelity": 1},
+            )
         history = (data or {}).get("history") or (data if isinstance(data, list) else [])
         if not history:
             return None
@@ -135,8 +115,8 @@ class PolymarketClient:
         book = await self._get(f"{CLOB_API}/book", params={"token_id": token_id})
         if book:
             try:
-                bids = book.get("bids") or []
-                asks = book.get("asks") or []
+                bids     = book.get("bids") or []
+                asks     = book.get("asks") or []
                 best_bid = float(bids[0]["price"]) if bids else 0
                 best_ask = float(asks[0]["price"]) if asks else 0
                 if best_bid and best_ask:
@@ -145,78 +125,85 @@ class PolymarketClient:
                 pass
         return None
 
-    async def get_open_positions(self):
-        path = "/positions"
-        headers = _l1_headers(self._api_key, self._api_secret, self._api_passphrase, "GET", path)
-        try:
-            async with self._s.get(f"{CLOB_API}{path}", headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                data = await r.json()
-                if not data:
-                    return []
-                return data if isinstance(data, list) else data.get("data", [])
-        except Exception as exc:
-            logger.debug("get_open_positions failed: %s", exc)
-            return []
-
     async def get_balance(self) -> float:
-        path = "/balance"
-        headers = _l1_headers(self._api_key, self._api_secret, self._api_passphrase, "GET", path)
+        if not self._us_client:
+            return 999.0
+        loop = asyncio.get_event_loop()
         try:
-            async with self._s.get(f"{CLOB_API}{path}", headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                data = await r.json()
-                logger.info("Balance API (status %s): %s", r.status, data)
-                val = (data.get("balance") or data.get("amount") or
-                       data.get("cash") or data.get("availableBalance") or 0)
+            data = await loop.run_in_executor(None, self._us_client.account.balances)
+            logger.info("Balance response: %s", data)
+            if isinstance(data, dict):
+                val = (data.get("cash") or data.get("balance") or
+                       data.get("availableBalance") or data.get("amount") or 0)
                 return float(val)
+            return 999.0
         except Exception as exc:
             logger.warning("get_balance failed: %s — skipping balance check", exc)
             return 999.0
 
-    async def place_market_order(self, token_id, side, amount_usd):
-        if self._clob_client:
-            loop = asyncio.get_event_loop()
-            try:
-                result = await loop.run_in_executor(None, self._sync_market_order, token_id, side, amount_usd)
-                if result:
-                    return result
-            except Exception as exc:
-                logger.warning("CLOB order failed, trying REST: %s", exc)
-        return await self._rest_market_order(token_id, side, amount_usd)
-
-    def _sync_market_order(self, token_id, side, amount_usd):
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
+    async def get_open_positions(self):
+        if not self._us_client:
+            return []
+        loop = asyncio.get_event_loop()
         try:
-            from py_clob_client.clob_types import BUY, SELL
-            s = BUY if side == "BUY" else SELL
-        except ImportError:
-            s = 0 if side == "BUY" else 1
-        signed = self._clob_client.create_market_order(MarketOrderArgs(token_id=token_id, amount=amount_usd, side=s))
-        resp = self._clob_client.post_order(signed, OrderType.FOK)
-        logger.info("CLOB order response: %s", resp)
-        return resp
+            data = await loop.run_in_executor(None, self._us_client.portfolio.positions)
+            if not data:
+                return []
+            return data if isinstance(data, list) else data.get("positions", [])
+        except Exception as exc:
+            logger.debug("get_open_positions failed: %s", exc)
+            return []
 
-    async def _rest_market_order(self, token_id, side, amount_usd):
-        resp = await self._post("/order", {"token_id": token_id, "side": side, "amount": str(amount_usd), "order_type": "MARKET"})
-        logger.info("REST order response: %s", resp)
-        return resp
-
-    async def close_position(self, token_id, size):
-        if self._clob_client:
-            loop = asyncio.get_event_loop()
-            try:
-                return await loop.run_in_executor(None, self._sync_close_position, token_id, size)
-            except Exception as exc:
-                logger.warning("CLOB close failed, trying REST: %s", exc)
-        return await self._rest_market_order(token_id, "SELL", size)
-
-    def _sync_close_position(self, token_id, size):
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
+    async def place_market_order(
+        self, market_slug: str, side: str, price: float, amount_usd: float
+    ) -> dict | None:
+        if not self._us_client:
+            logger.error("Polymarket.US client not initialised — cannot place order")
+            return None
+        if not market_slug:
+            logger.error("No market slug — cannot place order")
+            return None
+        loop = asyncio.get_event_loop()
         try:
-            from py_clob_client.clob_types import SELL
-        except ImportError:
-            SELL = 1
-        signed = self._clob_client.create_market_order(MarketOrderArgs(token_id=token_id, amount=size, side=SELL))
-        return self._clob_client.post_order(signed, OrderType.FOK)
+            return await loop.run_in_executor(
+                None, self._sync_place_order, market_slug, side, price, amount_usd
+            )
+        except Exception as exc:
+            logger.error("Order placement failed: %s", exc)
+            return None
+
+    def _sync_place_order(
+        self, market_slug: str, side: str, price: float, amount_usd: float
+    ) -> dict | None:
+        from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
+        intent   = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
+        quantity = max(1, round(amount_usd / price))
+        try:
+            resp = self._us_client.orders.create({
+                "marketSlug": market_slug,
+                "intent":     intent,
+                "type":       "ORDER_TYPE_LIMIT",
+                "price":      {"value": str(round(price, 4)), "currency": "USD"},
+                "quantity":   quantity,
+                "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            })
+            logger.info("US order placed: %s", resp)
+            return resp
+        except AuthenticationError as exc:
+            logger.error("Auth error: %s", exc)
+        except BadRequestError as exc:
+            logger.error("Bad request: %s", exc)
+        except NotFoundError as exc:
+            logger.error("Market not found (%s): %s", market_slug, exc)
+        except Exception as exc:
+            logger.error("Order error: %s", exc)
+        return None
+
+    async def close_position(
+        self, market_slug: str, side: str, price: float, size_usd: float
+    ) -> dict | None:
+        close_side = "NO" if side == "YES" else "YES"
+        return await self.place_market_order(market_slug, close_side, price, size_usd)
 
     def resolve_token_id(self, market, side):
         tokens = market.get("clobTokenIds") or market.get("tokens") or []
@@ -233,8 +220,13 @@ class PolymarketClient:
             return tok.get("token_id") or tok.get("id")
         return str(tok)
 
+    def get_market_slug(self, market: dict) -> str:
+        return market.get("slug") or market.get("marketSlug") or ""
+
     def get_event_date(self, market):
-        raw = market.get("startDate") or market.get("start_date") or market.get("endDate") or market.get("endDateIso") or market.get("resolutionTime") or ""
+        raw = (market.get("startDate") or market.get("start_date") or
+               market.get("endDate") or market.get("endDateIso") or
+               market.get("resolutionTime") or "")
         if not raw:
             return "N/A"
         try:
@@ -251,7 +243,8 @@ class PolymarketClient:
         if not raw:
             return None
         try:
-            end_ts = float(raw) if isinstance(raw, (int, float)) else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+            end_ts = (float(raw) if isinstance(raw, (int, float))
+                      else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp())
             return end_ts - time.time()
         except Exception:
             return None
