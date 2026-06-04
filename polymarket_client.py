@@ -131,6 +131,15 @@ class PolymarketClient:
         if not market.get("active", True) or market.get("closed", False):
             logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
+        # Skip games that started more than 4 hours ago (stale/finished)
+        game_start = market.get("gameStartTime") or market.get("startTime") or ""
+        if game_start:
+            try:
+                gst = datetime.fromisoformat(str(game_start).replace("Z", "+00:00")).timestamp()
+                if time.time() - gst > 4 * 3600:
+                    return False
+            except Exception:
+                pass
         text = " ".join([
             (market.get("question") or "").lower(),
             (market.get("title") or "").lower(),
@@ -329,8 +338,10 @@ class PolymarketClient:
                         return p
                 except Exception:
                     pass
-        # Fall back to CLOB API (works for Gamma-sourced markets with real token IDs)
-        return await self.get_current_price(token_id)
+        # Fall back to CLOB API only for real hex token IDs (not slugs)
+        if token_id and len(str(token_id)) >= 32 and str(token_id).replace("-", "").isalnum():
+            return await self.get_current_price(token_id)
+        return None
 
     def get_market_slug(self, market: dict) -> str:
         return (
