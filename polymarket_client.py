@@ -136,6 +136,15 @@ class PolymarketClient:
                     event["slug"]     = event_slug
                     event["question"] = event.get("question") or event.get("title") or ""
                     markets.append(event)
+            game_times = sorted(set(
+                m.get("gameStartTime", "")[:10]
+                for m in markets if m.get("gameStartTime")
+            ))
+            logger.info("gameStartTime range in %d markets: %s … %s",
+                        len(markets),
+                        game_times[0] if game_times else "none",
+                        game_times[-1] if game_times else "none")
+            logger.info("gameStartTime dates sample: %s", game_times[-10:])
             return markets
         except Exception as exc:
             logger.warning("US SDK events.list failed: %s — falling back to Gamma API", exc)
