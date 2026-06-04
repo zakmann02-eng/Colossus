@@ -34,6 +34,7 @@ class PolymarketClient:
         self._secret_key = secret_key.strip()
         self._us_client  = self._init_us_client()
         self._market_cache: dict = {}
+        self._slug_map: dict[str, str] = {}  # gamma slug -> US market slug
         logger.info("PolymarketClient ready — key_id %s…", self._key_id[:8])
 
     def _init_us_client(self):
@@ -58,7 +59,18 @@ class PolymarketClient:
             logger.debug("GET %s failed: %s", url, exc)
             return None
 
+    # ---------------------------------------------------------------- #
+    # Market scanning — SDK first, Gamma fallback                       #
+    # ---------------------------------------------------------------- #
+
     async def get_sports_markets(self, limit=200):
+        us_markets = await self._get_us_sdk_markets(limit)
+        if us_markets:
+            allowed = [m for m in us_markets if self._is_allowed(m)]
+            logger.info("Polymarket.US SDK: %d markets, %d allowed", len(us_markets), len(allowed))
+            return allowed
+
+        # Fallback to Gamma API
         data = await self._get(
             f"{GAMMA_API}/markets",
             params={"active": "true", "closed": "false", "limit": limit,
@@ -66,6 +78,49 @@ class PolymarketClient:
         )
         markets = data if isinstance(data, list) else (data or {}).get("data", []) if data else []
         return [m for m in markets if self._is_allowed(m)]
+
+    async def _get_us_sdk_markets(self, limit=200) -> list[dict]:
+        if not self._us_client:
+            return []
+        loop = asyncio.get_event_loop()
+        try:
+            data = await loop.run_in_executor(
+                None,
+                lambda: self._us_client.events.list({"limit": limit, "active": True}),
+            )
+            if not data:
+                return []
+            events = (
+                data if isinstance(data, list)
+                else data.get("data") or data.get("events") or data.get("results") or []
+            )
+            if events:
+                logger.info("US SDK event sample keys: %s", list(events[0].keys()))
+
+            markets: list[dict] = []
+            for event in events:
+                event_slug = event.get("slug") or event.get("eventSlug") or ""
+                sub = event.get("markets") or []
+                if sub:
+                    for m in sub:
+                        row = {**event, **m}
+                        row["slug"]        = m.get("slug") or event_slug
+                        row["eventSlug"]   = event_slug
+                        row["question"]    = m.get("question") or m.get("title") or event.get("title") or ""
+                        row["volume24hr"]  = event.get("volume24hr") or m.get("volume24hr") or 0
+                        row["resolutionTime"] = (
+                            m.get("resolutionTime") or m.get("endDate")
+                            or event.get("endDate") or event.get("resolutionTime") or ""
+                        )
+                        markets.append(row)
+                else:
+                    event["slug"]     = event_slug
+                    event["question"] = event.get("question") or event.get("title") or ""
+                    markets.append(event)
+            return markets
+        except Exception as exc:
+            logger.warning("US SDK events.list failed: %s — falling back to Gamma API", exc)
+            return []
 
     def _is_allowed(self, market):
         if not market.get("active", True) or market.get("closed", False):
@@ -84,6 +139,10 @@ class PolymarketClient:
             if kw in text:
                 return False
         return True
+
+    # ---------------------------------------------------------------- #
+    # Price data                                                        #
+    # ---------------------------------------------------------------- #
 
     async def get_price_15min_ago(self, market, token_id):
         now   = int(time.time())
@@ -125,6 +184,10 @@ class PolymarketClient:
                 pass
         return None
 
+    # ---------------------------------------------------------------- #
+    # Account                                                           #
+    # ---------------------------------------------------------------- #
+
     async def get_balance(self) -> float:
         if not self._us_client:
             return 999.0
@@ -158,6 +221,10 @@ class PolymarketClient:
             logger.debug("get_open_positions failed: %s", exc)
             return []
 
+    # ---------------------------------------------------------------- #
+    # Order placement                                                   #
+    # ---------------------------------------------------------------- #
+
     async def place_market_order(
         self, market_slug: str, side: str, price: float, amount_usd: float
     ) -> dict | None:
@@ -182,16 +249,18 @@ class PolymarketClient:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
         intent   = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
         quantity = max(1, round(amount_usd / price))
+        order = {
+            "marketSlug": market_slug,
+            "intent":     intent,
+            "type":       "ORDER_TYPE_LIMIT",
+            "price":      {"value": str(round(price, 4)), "currency": "USD"},
+            "quantity":   quantity,
+            "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+        }
+        logger.info("Placing order: %s", order)
         try:
-            resp = self._us_client.orders.create({
-                "marketSlug": market_slug,
-                "intent":     intent,
-                "type":       "ORDER_TYPE_LIMIT",
-                "price":      {"value": str(round(price, 4)), "currency": "USD"},
-                "quantity":   quantity,
-                "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
-            })
-            logger.info("US order placed: %s", resp)
+            resp = self._us_client.orders.create(order)
+            logger.info("Order response: %s", resp)
             return resp
         except AuthenticationError as exc:
             logger.error("Auth error: %s", exc)
@@ -209,6 +278,10 @@ class PolymarketClient:
         close_side = "NO" if side == "YES" else "YES"
         return await self.place_market_order(market_slug, close_side, price, size_usd)
 
+    # ---------------------------------------------------------------- #
+    # Helpers                                                           #
+    # ---------------------------------------------------------------- #
+
     def resolve_token_id(self, market, side):
         tokens = market.get("clobTokenIds") or market.get("tokens") or []
         if isinstance(tokens, str):
@@ -225,12 +298,18 @@ class PolymarketClient:
         return str(tok)
 
     def get_market_slug(self, market: dict) -> str:
-        return market.get("slug") or market.get("marketSlug") or ""
+        return (
+            market.get("slug")
+            or market.get("marketSlug")
+            or market.get("eventSlug")
+            or ""
+        )
 
     def get_event_date(self, market):
-        raw = (market.get("startDate") or market.get("start_date") or
-               market.get("endDate") or market.get("endDateIso") or
-               market.get("resolutionTime") or "")
+        raw = (
+            market.get("resolutionTime") or market.get("endDate")
+            or market.get("startDate") or market.get("endDateIso") or ""
+        )
         if not raw:
             return "N/A"
         try:
@@ -247,8 +326,10 @@ class PolymarketClient:
         if not raw:
             return None
         try:
-            end_ts = (float(raw) if isinstance(raw, (int, float))
-                      else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp())
+            end_ts = (
+                float(raw) if isinstance(raw, (int, float))
+                else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+            )
             return end_ts - time.time()
         except Exception:
             return None
@@ -256,6 +337,6 @@ class PolymarketClient:
     def market_url(self, market):
         slug = market.get("slug") or market.get("marketSlug") or ""
         if slug:
-            return f"https://polymarket.com/event/{slug}"
+            return f"https://polymarket.us/event/{slug}"
         mid = market.get("id") or ""
-        return f"https://polymarket.com/event/{mid}" if mid else "https://polymarket.com"
+        return f"https://polymarket.us/event/{mid}" if mid else "https://polymarket.us"
