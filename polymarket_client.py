@@ -358,7 +358,7 @@ class PolymarketClient:
             return str(raw)[:10] or "N/A"
 
     def seconds_to_resolution(self, market):
-        raw = market.get("resolutionTime") or market.get("endDate") or market.get("closeTime")
+        raw = market.get("resolutionTime") or market.get("closeTime")
         if not raw:
             return None
         try:
