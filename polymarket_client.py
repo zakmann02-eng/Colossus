@@ -87,9 +87,9 @@ class PolymarketClient:
             data = await loop.run_in_executor(
                 None,
                 lambda: self._us_client.events.list({
-                    "limit": limit,
+                    "limit": 500,
                     "active": True,
-                    "order": "startDate",
+                    "order": "gameStartTime",
                     "ascending": False,
                 }),
             )
@@ -99,7 +99,7 @@ class PolymarketClient:
                 logger.info("Sorted SDK returned no events — retrying without sort")
                 data = await loop.run_in_executor(
                     None,
-                    lambda: self._us_client.events.list({"limit": limit, "active": True}),
+                    lambda: self._us_client.events.list({"limit": 500, "active": True}),
                 )
             if not data:
                 return []
