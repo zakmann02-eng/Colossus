@@ -84,8 +84,7 @@ class PolymarketClient:
             return []
         loop = asyncio.get_event_loop()
         try:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-                      data = await loop.run_in_executor(
+            data = await loop.run_in_executor(
                 None,
                 lambda: self._us_client.events.list({
                     "limit": limit,
@@ -101,7 +100,7 @@ class PolymarketClient:
                 data = await loop.run_in_executor(
                     None,
                     lambda: self._us_client.events.list({"limit": limit, "active": True}),
-                ) 
+                )
             if not data:
                 return []
             events = (
