@@ -34,7 +34,7 @@ class PolymarketClient:
         self._secret_key = secret_key.strip()
         self._us_client  = self._init_us_client()
         self._market_cache: dict = {}
-        self._slug_map: dict[str, str] = {}  # gamma slug -> US market slug
+        self._slug_map: dict[str, str] = {}
         logger.info("PolymarketClient ready — key_id %s…", self._key_id[:8])
 
     def _init_us_client(self):
@@ -117,6 +117,7 @@ class PolymarketClient:
                         row["resolutionTime"] = (
                             m.get("resolutionTime") or event.get("resolutionTime") or ""
                         )
+                        row["eventState"]  = event.get("eventState") or ""
                         markets.append(row)
                 else:
                     event["slug"]     = event_slug
@@ -131,15 +132,12 @@ class PolymarketClient:
         if not market.get("active", True) or market.get("closed", False):
             logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
-        # Skip games that started more than 4 hours ago (stale/finished)
-        game_start = market.get("gameStartTime") or market.get("startTime") or ""
-        if game_start:
-            try:
-                gst = datetime.fromisoformat(str(game_start).replace("Z", "+00:00")).timestamp()
-                if time.time() - gst > 4 * 3600:
-                    return False
-            except Exception:
-                pass
+        # Skip completed/final games
+        event_state = (market.get("eventState") or "").upper()
+        if event_state in ("FINAL", "COMPLETED", "POST_GAME", "POSTGAME", "ENDED", "RESOLVED"):
+            return False
+        if event_state:
+            logger.info("eventState=%s: %s", event_state, (market.get("question") or market.get("title") or "")[:50])
         text = " ".join([
             (market.get("question") or "").lower(),
             (market.get("title") or "").lower(),
@@ -311,14 +309,12 @@ class PolymarketClient:
             if isinstance(tok, dict):
                 return tok.get("token_id") or tok.get("id")
             return str(tok)
-        # Fallback: use market id or slug as pseudo token-id for tracking
         return (
             market.get("conditionId") or market.get("id")
             or market.get("slug") or market.get("eventSlug") or None
         )
 
     async def get_market_price(self, market: dict, token_id: str) -> float | None:
-        """Get price — tries embedded outcomePrices first, then CLOB API."""
         op = market.get("outcomePrices")
         if op:
             try:
@@ -328,7 +324,6 @@ class PolymarketClient:
                     return p
             except Exception:
                 pass
-        # Try other embedded price fields
         for field in ("lastTradePrice", "price", "bestBid"):
             raw = market.get(field)
             if raw:
@@ -338,7 +333,6 @@ class PolymarketClient:
                         return p
                 except Exception:
                     pass
-        # Fall back to CLOB API only for real hex token IDs (not slugs)
         if token_id and len(str(token_id)) >= 32 and str(token_id).replace("-", "").isalnum():
             return await self.get_current_price(token_id)
         return None
