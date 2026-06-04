@@ -93,7 +93,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         return None
 
     secs = client.seconds_to_resolution(market)
-    if secs is not None and secs > MAX_DAYS_OUT:
+    if secs is not None and (secs <= 0 or secs > MAX_DAYS_OUT):
         logger.info("SKIP time(%.1fd): %s", secs / 86400, question[:60])
         return None
 
