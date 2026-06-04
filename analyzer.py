@@ -101,7 +101,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     if vol_24h < MIN_VOL_24H:
         return None
 
-    price = await client.get_current_price(token_id)
+    price = await client.get_market_price(market, token_id)
     if not price:
         logger.info("SKIP no-price: %s", question[:60])
         return None
