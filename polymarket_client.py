@@ -85,22 +85,23 @@ class PolymarketClient:
         loop = asyncio.get_event_loop()
         try:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            data = await loop.run_in_executor(
+                      data = await loop.run_in_executor(
                 None,
                 lambda: self._us_client.events.list({
                     "limit": limit,
                     "active": True,
-                    "startDate": cutoff,
+                    "order": "startDate",
+                    "ascending": False,
                 }),
             )
-            # Fall back to unfiltered if date filter returns nothing
+            # Fall back to unfiltered if sorted query returns nothing
             events_check = data if isinstance(data, list) else (data or {}).get("data") or (data or {}).get("events") or (data or {}).get("results") or []
             if not data or not events_check:
-                logger.info("Date-filtered SDK returned no events — retrying without date filter")
+                logger.info("Sorted SDK returned no events — retrying without sort")
                 data = await loop.run_in_executor(
                     None,
                     lambda: self._us_client.events.list({"limit": limit, "active": True}),
-                )
+                ) 
             if not data:
                 return []
             events = (
