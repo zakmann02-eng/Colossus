@@ -355,7 +355,6 @@ class PolymarketClient:
                     sides = json.loads(sides)
                 for s in sides:
                     if isinstance(s, dict):
-                        # look for YES side price
                         if str(s.get("side") or s.get("outcome") or "").upper() in ("YES", "LONG", "0"):
                             for k in ("price", "probability", "lastPrice", "bestAsk", "bestBid"):
                                 raw = s.get(k)
@@ -440,7 +439,7 @@ class PolymarketClient:
         except Exception:
             return str(raw)[:10] or "N/A"
 
-        def seconds_to_resolution(self, market):
+    def seconds_to_resolution(self, market):
         raw = market.get("resolutionTime") or market.get("closeTime")
         if not raw:
             # Fall back to gameStartTime + 4h (covers in-progress games; past games return negative)
@@ -463,3 +462,10 @@ class PolymarketClient:
             return end_ts - time.time()
         except Exception:
             return None
+
+    def market_url(self, market):
+        slug = market.get("slug") or market.get("marketSlug") or ""
+        if slug:
+            return f"https://polymarket.us/event/{slug}"
+        mid = market.get("id") or ""
+        return f"https://polymarket.us/event/{mid}" if mid else "https://polymarket.us"
