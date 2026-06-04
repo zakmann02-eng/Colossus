@@ -333,8 +333,10 @@ class PolymarketClient:
         )
 
     async def get_market_price(self, market: dict, token_id: str) -> float | None:
+        question = (market.get("question") or "")[:40]
+
+        # outcomePrices — skip if values are 0/1 (binary markers, not probabilities)
         op = market.get("outcomePrices")
-        logger.info("outcomePrices for '%s': %r", (market.get("question") or "")[:40], op)
         if op:
             try:
                 prices = json.loads(op) if isinstance(op, str) else op
@@ -343,6 +345,61 @@ class PolymarketClient:
                     return p
             except Exception:
                 pass
+
+        # marketSides — list of {side, price/probability} dicts
+        sides = market.get("marketSides") or []
+        logger.info("marketSides for '%s': %r", question, sides)
+        if sides:
+            try:
+                if isinstance(sides, str):
+                    sides = json.loads(sides)
+                for s in sides:
+                    if isinstance(s, dict):
+                        # look for YES side price
+                        if str(s.get("side") or s.get("outcome") or "").upper() in ("YES", "LONG", "0"):
+                            for k in ("price", "probability", "lastPrice", "bestAsk", "bestBid"):
+                                raw = s.get(k)
+                                if raw is not None:
+                                    p = float(raw)
+                                    if 0 < p < 1:
+                                        return p
+                # fallback: just grab first numeric price in range
+                for s in sides:
+                    if isinstance(s, dict):
+                        for k in ("price", "probability", "lastPrice", "bestAsk", "bestBid"):
+                            raw = s.get(k)
+                            if raw is not None:
+                                try:
+                                    p = float(raw)
+                                    if 0 < p < 1:
+                                        return p
+                                except Exception:
+                                    pass
+            except Exception as exc:
+                logger.info("marketSides parse error: %s", exc)
+
+        # outcomes — list or dict
+        outcomes = market.get("outcomes") or []
+        logger.info("outcomes for '%s': %r", question, outcomes)
+        if outcomes:
+            try:
+                if isinstance(outcomes, str):
+                    outcomes = json.loads(outcomes)
+                items = outcomes if isinstance(outcomes, list) else list(outcomes.values())
+                for item in items:
+                    if isinstance(item, dict):
+                        for k in ("price", "probability", "lastPrice"):
+                            raw = item.get(k)
+                            if raw is not None:
+                                try:
+                                    p = float(raw)
+                                    if 0 < p < 1:
+                                        return p
+                                except Exception:
+                                    pass
+            except Exception as exc:
+                logger.info("outcomes parse error: %s", exc)
+
         for field in ("lastTradePrice", "price", "bestBid"):
             raw = market.get(field)
             if raw:
@@ -352,8 +409,11 @@ class PolymarketClient:
                         return p
                 except Exception:
                     pass
+
         if token_id and len(str(token_id)) >= 32 and str(token_id).replace("-", "").isalnum():
             return await self.get_current_price(token_id)
+
+        logger.info("no-price fields for '%s': marketSides=%r outcomes=%r op=%r", question, sides, outcomes, op)
         return None
 
     def get_market_slug(self, market: dict) -> str:
