@@ -50,18 +50,19 @@ _TIERS = {
 
 @dataclass
 class TradeSignal:
-    market_id:  str
-    question:   str
-    side:       str
-    token_id:   str
-    price_now:  float
-    triggers:   list[str] = field(default_factory=list)
-    score:      int       = 0
-    event_date: str       = "N/A"
-    amount_usd: float     = 0.50
-    tp_pct:     float     = 0.08
-    sl_pct:     float     = 0.08
-    conviction: str       = "LOW"
+    market_id:   str
+    market_slug: str
+    question:    str
+    side:        str
+    token_id:    str
+    price_now:   float
+    triggers:    list[str] = field(default_factory=list)
+    score:       int       = 0
+    event_date:  str       = "N/A"
+    amount_usd:  float     = 0.50
+    tp_pct:      float     = 0.08
+    sl_pct:      float     = 0.08
+    conviction:  str       = "LOW"
 
 
 def _safe_float(val, default: float = 0.0) -> float:
@@ -82,8 +83,9 @@ def _size_position(n_triggers: int) -> tuple[float, float, float, str]:
 
 async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSignal | None:
 
-    question  = market.get("question") or market.get("title") or ""
-    market_id = market.get("id") or market.get("conditionId") or ""
+    question    = market.get("question") or market.get("title") or ""
+    market_id   = market.get("id") or market.get("conditionId") or ""
+    market_slug = client.get_market_slug(market)
 
     token_id = client.resolve_token_id(market, "YES")
     if not token_id:
@@ -92,12 +94,11 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
 
     secs = client.seconds_to_resolution(market)
     if secs is not None and (secs <= 0 or secs > MAX_DAYS_OUT):
-        logger.info("SKIP time(%.1fd): %s", secs/86400, question[:60])
+        logger.info("SKIP time(%.1fd): %s", secs / 86400, question[:60])
         return None
 
     vol_24h = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
     if vol_24h < MIN_VOL_24H:
-        logger.info("SKIP low-vol($%.0f): %s", vol_24h, question[:60])
         return None
 
     price = await client.get_current_price(token_id)
@@ -120,8 +121,8 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         if move >= T2_MOVE:
             triggers.append(f"T2:move={move:.1%}")
 
-    vol_all  = _safe_float(market.get("volume") or market.get("volumeNum"))
-    days_est = max(1.0, _safe_float(market.get("daysAgo"), 7.0))
+    vol_all   = _safe_float(market.get("volume") or market.get("volumeNum"))
+    days_est  = max(1.0, _safe_float(market.get("daysAgo"), 7.0))
     daily_avg = vol_all / days_est if vol_all else 0
     if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
@@ -138,22 +139,23 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     score              = min(100, 25 + len(triggers) * 25)
 
     signal = TradeSignal(
-        market_id  = market_id,
-        question   = question,
-        side       = side,
-        token_id   = token_id if side == "YES" else (client.resolve_token_id(market, "NO") or token_id),
-        price_now  = price,
-        triggers   = triggers,
-        score      = score,
-        event_date = client.get_event_date(market),
-        amount_usd = amount,
-        tp_pct     = tp,
-        sl_pct     = sl,
-        conviction = label,
+        market_id   = market_id,
+        market_slug = market_slug,
+        question    = question,
+        side        = side,
+        token_id    = token_id if side == "YES" else (client.resolve_token_id(market, "NO") or token_id),
+        price_now   = price,
+        triggers    = triggers,
+        score       = score,
+        event_date  = client.get_event_date(market),
+        amount_usd  = amount,
+        tp_pct      = tp,
+        sl_pct      = sl,
+        conviction  = label,
     )
 
     logger.info(
-        "Signal: %s | %s @ %.2f | conviction=%s amount=$%.2f TP=%.0f%% SL=%.0f%%",
-        question[:55], side, price, label, amount, tp * 100, sl * 100,
+        "Signal: %s | %s @ %.2f | slug=%s conviction=%s amount=$%.2f",
+        question[:50], side, price, market_slug or "NO-SLUG", label, amount,
     )
     return signal
