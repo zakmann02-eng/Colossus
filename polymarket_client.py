@@ -440,10 +440,21 @@ class PolymarketClient:
         except Exception:
             return str(raw)[:10] or "N/A"
 
-    def seconds_to_resolution(self, market):
+        def seconds_to_resolution(self, market):
         raw = market.get("resolutionTime") or market.get("closeTime")
         if not raw:
-            return None
+            # Fall back to gameStartTime + 4h (covers in-progress games; past games return negative)
+            raw = market.get("gameStartTime")
+            if not raw:
+                return None
+            try:
+                if isinstance(raw, (int, float)):
+                    game_ts = float(raw)
+                else:
+                    game_ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+                return (game_ts + 4 * 3600) - time.time()
+            except Exception:
+                return None
         try:
             end_ts = (
                 float(raw) if isinstance(raw, (int, float))
@@ -452,10 +463,3 @@ class PolymarketClient:
             return end_ts - time.time()
         except Exception:
             return None
-
-    def market_url(self, market):
-        slug = market.get("slug") or market.get("marketSlug") or ""
-        if slug:
-            return f"https://polymarket.us/event/{slug}"
-        mid = market.get("id") or ""
-        return f"https://polymarket.us/event/{mid}" if mid else "https://polymarket.us"
