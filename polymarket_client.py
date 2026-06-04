@@ -98,10 +98,14 @@ class PolymarketClient:
                 logger.info("US SDK event sample keys: %s", list(events[0].keys()))
 
             markets: list[dict] = []
+            logged_sub_keys = False
             for event in events:
                 event_slug = event.get("slug") or event.get("eventSlug") or ""
                 sub = event.get("markets") or []
                 if sub:
+                    if not logged_sub_keys:
+                        logger.info("Sub-market sample keys: %s", list(sub[0].keys()))
+                        logged_sub_keys = True
                     for m in sub:
                         row = {**event, **m}
                         row["active"]      = event.get("active", True)
@@ -292,14 +296,42 @@ class PolymarketClient:
             try:
                 tokens = json.loads(tokens)
             except Exception:
-                return None
-        if not tokens:
-            return None
-        idx = 0 if side == "YES" else 1
-        tok = tokens[idx] if idx < len(tokens) else tokens[0]
-        if isinstance(tok, dict):
-            return tok.get("token_id") or tok.get("id")
-        return str(tok)
+                tokens = []
+        if tokens:
+            idx = 0 if side == "YES" else 1
+            tok = tokens[idx] if idx < len(tokens) else tokens[0]
+            if isinstance(tok, dict):
+                return tok.get("token_id") or tok.get("id")
+            return str(tok)
+        # Fallback: use market id or slug as pseudo token-id for tracking
+        return (
+            market.get("conditionId") or market.get("id")
+            or market.get("slug") or market.get("eventSlug") or None
+        )
+
+    async def get_market_price(self, market: dict, token_id: str) -> float | None:
+        """Get price — tries embedded outcomePrices first, then CLOB API."""
+        op = market.get("outcomePrices")
+        if op:
+            try:
+                prices = json.loads(op) if isinstance(op, str) else op
+                p = float(prices[0])
+                if 0 < p < 1:
+                    return p
+            except Exception:
+                pass
+        # Try other embedded price fields
+        for field in ("lastTradePrice", "price", "bestBid"):
+            raw = market.get(field)
+            if raw:
+                try:
+                    p = float(raw)
+                    if 0 < p < 1:
+                        return p
+                except Exception:
+                    pass
+        # Fall back to CLOB API (works for Gamma-sourced markets with real token IDs)
+        return await self.get_current_price(token_id)
 
     def get_market_slug(self, market: dict) -> str:
         return (
