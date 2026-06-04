@@ -132,17 +132,17 @@ class PolymarketClient:
         try:
             data = await loop.run_in_executor(None, self._us_client.account.balances)
             logger.info("Balance response: %s", data)
-                    if isinstance(data, dict):
+            if isinstance(data, dict):
                 balances = data.get("balances")
-        if balances and isinstance(balances, list):
+                if balances and isinstance(balances, list):
                     b = balances[0]
                     val = b.get("buyingPower") or b.get("currentBalance") or 0
                     return float(val)
                 val = data.get("cash") or data.get("balance") or data.get("availableBalance") or 0
                 return float(val)
-            return 999.0   
+            return 999.0
         except Exception as exc:
-            logger.warning("get_balance failed: %s — skipping balance check", exc)
+            logger.warning("get_balance failed: %s — assuming funds available", exc)
             return 999.0
 
     async def get_open_positions(self):
