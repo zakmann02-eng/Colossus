@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 
@@ -84,10 +84,23 @@ class PolymarketClient:
             return []
         loop = asyncio.get_event_loop()
         try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
             data = await loop.run_in_executor(
                 None,
-                lambda: self._us_client.events.list({"limit": limit, "active": True}),
+                lambda: self._us_client.events.list({
+                    "limit": limit,
+                    "active": True,
+                    "startDate": cutoff,
+                }),
             )
+            # Fall back to unfiltered if date filter returns nothing
+            events_check = data if isinstance(data, list) else (data or {}).get("data") or (data or {}).get("events") or (data or {}).get("results") or []
+            if not data or not events_check:
+                logger.info("Date-filtered SDK returned no events — retrying without date filter")
+                data = await loop.run_in_executor(
+                    None,
+                    lambda: self._us_client.events.list({"limit": limit, "active": True}),
+                )
             if not data:
                 return []
             events = (
@@ -321,6 +334,7 @@ class PolymarketClient:
 
     async def get_market_price(self, market: dict, token_id: str) -> float | None:
         op = market.get("outcomePrices")
+        logger.info("outcomePrices for '%s': %r", (market.get("question") or "")[:40], op)
         if op:
             try:
                 prices = json.loads(op) if isinstance(op, str) else op
