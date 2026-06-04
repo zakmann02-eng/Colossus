@@ -128,7 +128,7 @@ async def scan_markets(
         if signal is None:
             continue
 
-             balance = await client.get_balance()
+        balance = await client.get_balance()
         if balance < signal.amount_usd:
             logger.info("Insufficient balance ($%.2f) for $%.2f trade — stopping", balance, signal.amount_usd)
             break
@@ -140,7 +140,11 @@ async def scan_markets(
             signal.token_id, "BUY", signal.amount_usd
         )
 
-        status = "✅ filled" if resp else "⚠️ failed"
+        logger.info("Order raw response: %s", resp)
+        order_status = (resp or {}).get("status", "") if isinstance(resp, dict) else ""
+        filled = order_status in ("matched", "filled", "MATCHED", "FILLED") or (resp and not isinstance(resp, dict))
+        status = "✅ filled" if filled else f"⚠️ not filled ({order_status or 'no response'})"
+
         msg = (
             f"🏆 *Trade Opened*\n"
             f"*{signal.question[:80]}*\n\n"
@@ -154,7 +158,7 @@ async def scan_markets(
         )
         await _send(app, msg)
 
-        if resp:
+        if filled:
             position_mgr.record_entry(
                 signal.token_id, signal.price_now,
                 signal.tp_pct, signal.sl_pct
