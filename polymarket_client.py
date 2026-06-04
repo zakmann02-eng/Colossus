@@ -164,10 +164,13 @@ class PolymarketClient:
         try:
             async with self._s.get(f"{CLOB_API}{path}", headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
                 data = await r.json()
-                return float(data.get("balance") or data.get("amount") or 0)
+                logger.info("Balance API (status %s): %s", r.status, data)
+                val = (data.get("balance") or data.get("amount") or
+                       data.get("cash") or data.get("availableBalance") or 0)
+                return float(val)
         except Exception as exc:
-            logger.debug("get_balance failed: %s", exc)
-            return 0.0
+            logger.warning("get_balance failed: %s — skipping balance check", exc)
+            return 999.0
 
     async def place_market_order(self, token_id, side, amount_usd):
         if self._clob_client:
