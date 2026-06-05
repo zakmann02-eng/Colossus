@@ -2,7 +2,7 @@
 Colossus — autonomous Polymarket sports trading bot.
 
 Uses polymarket-us SDK for authenticated trading on Polymarket.US.
-Scans markets every 60s, fires on 1+ triggers, places up to $2 orders,
+Scans markets every 60s, fires on 1+ triggers, places up to $1 orders,
 monitors positions for TP/SL every 5 min. Telegram alerts throughout.
 """
 
@@ -66,7 +66,7 @@ POLY_KEY_ID     = _require("POLYMARKET_KEY_ID")
 POLY_SECRET_KEY = _require("POLYMARKET_SECRET_KEY")
 
 MIN_TRADE_USD = float(os.getenv("MIN_TRADE_USD",   "0.10"))
-MAX_TRADE_USD = float(os.getenv("MAX_TRADE_USD",   "2.00"))
+MAX_TRADE_USD = float(os.getenv("MAX_TRADE_USD",   "1.00"))
 TP_PCT        = float(os.getenv("TAKE_PROFIT_PCT", "10.0")) / 100
 SL_PCT        = float(os.getenv("STOP_LOSS_PCT",   "10.0")) / 100
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL",     "60"))
