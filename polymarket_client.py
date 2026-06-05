@@ -83,69 +83,126 @@ class PolymarketClient:
         if not self._us_client:
             return []
         loop = asyncio.get_event_loop()
-        try:
-            data = await loop.run_in_executor(
-                None,
-                lambda: self._us_client.events.list({
-                    "limit": 500,
-                    "active": True,
-                    "order": "gameStartTime",
-                    "ascending": False,
-                }),
-            )
-            # Fall back to unfiltered if sorted query returns nothing
-            events_check = data if isinstance(data, list) else (data or {}).get("data") or (data or {}).get("events") or (data or {}).get("results") or []
-            if not data or not events_check:
-                logger.info("Sorted SDK returned no events — retrying without sort")
-                data = await loop.run_in_executor(
-                    None,
-                    lambda: self._us_client.events.list({"limit": 500, "active": True}),
-                )
-            if not data:
-                return []
-            events = (
-                data if isinstance(data, list)
-                else data.get("data") or data.get("events") or data.get("results") or []
-            )
-            if events:
-                logger.info("US SDK event sample keys: %s", list(events[0].keys()))
 
-            markets: list[dict] = []
-            logged_sub_keys = False
+        def _build_markets(events):
+            markets = []
             for event in events:
                 event_slug = event.get("slug") or event.get("eventSlug") or ""
                 sub = event.get("markets") or []
                 if sub:
-                    if not logged_sub_keys:
-                        logger.info("Sub-market sample keys: %s", list(sub[0].keys()))
-                        logged_sub_keys = True
                     for m in sub:
                         row = {**event, **m}
-                        row["active"]      = event.get("active", True)
-                        row["closed"]      = False
-                        row["slug"]        = m.get("slug") or event_slug
-                        row["eventSlug"]   = event_slug
-                        row["question"]    = m.get("question") or m.get("title") or event.get("title") or ""
-                        row["volume24hr"]  = event.get("volume24hr") or m.get("volume24hr") or 0
-                        row["resolutionTime"] = (
-                            m.get("resolutionTime") or event.get("resolutionTime") or ""
-                        )
-                        row["eventState"]  = event.get("eventState") or ""
+                        row["active"]         = event.get("active", True)
+                        row["closed"]         = False
+                        row["slug"]           = m.get("slug") or event_slug
+                        row["eventSlug"]      = event_slug
+                        row["question"]       = m.get("question") or m.get("title") or event.get("title") or ""
+                        row["volume24hr"]     = event.get("volume24hr") or m.get("volume24hr") or 0
+                        row["resolutionTime"] = m.get("resolutionTime") or event.get("resolutionTime") or ""
+                        row["eventState"]     = event.get("eventState") or ""
                         markets.append(row)
                 else:
                     event["slug"]     = event_slug
                     event["question"] = event.get("question") or event.get("title") or ""
                     markets.append(event)
+            return markets
+
+        def _extract_events(data):
+            return (
+                data if isinstance(data, list)
+                else (data or {}).get("data") or (data or {}).get("events") or (data or {}).get("results") or []
+            ) if data else []
+
+        now_ts = time.time()
+
+        def _upcoming_in(markets):
+            for m in markets:
+                gst = m.get("gameStartTime")
+                if not gst:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(str(gst).replace("Z", "+00:00")).timestamp()
+                    if ts > now_ts:
+                        return True
+                except Exception:
+                    pass
+            return False
+
+        try:
+            # Pass 1: try sort by gameStartTime DESC — fast path if API honours it
+            data = await loop.run_in_executor(
+                None,
+                lambda: self._us_client.events.list({
+                    "limit": 200,
+                    "active": True,
+                    "order": "gameStartTime",
+                    "ascending": False,
+                }),
+            )
+            events = _extract_events(data)
+            if events:
+                logger.info("US SDK pass-1: %d events, sample keys: %s", len(events), list(events[0].keys()))
+            markets = _build_markets(events)
+
+            if _upcoming_in(markets):
+                logger.info("Pass 1 found upcoming games — %d markets total", len(markets))
+                return markets
+
+            # Pass 2: API ignores sort; paginate forward until we find upcoming games
+            # NBA regular season ~1,230 events; Finals at ~1,300+
+            logger.info("Pass 1: no upcoming games found — paginating (200/page) to find them")
+            all_markets = list(markets)
+            offset = 200
+            max_offset = 2000
+            found = False
+            while offset <= max_offset:
+                off = offset  # capture for lambda
+                page_data = await loop.run_in_executor(
+                    None,
+                    lambda: self._us_client.events.list({
+                        "limit": 200,
+                        "active": True,
+                        "offset": off,
+                    }),
+                )
+                page_events = _extract_events(page_data)
+                if not page_events:
+                    logger.info("Pagination stopped at offset %d — no more events", off)
+                    break
+                page_markets = _build_markets(page_events)
+                all_markets.extend(page_markets)
+                logger.info("Paginated offset=%d: +%d markets (%d total)", off, len(page_markets), len(all_markets))
+                if _upcoming_in(page_markets):
+                    logger.info("Found upcoming games at offset %d", off)
+                    found = True
+                    # Fetch a few more pages to get all upcoming events
+                    for extra_off in range(off + 200, off + 600, 200):
+                        eo = extra_off
+                        extra_data = await loop.run_in_executor(
+                            None,
+                            lambda: self._us_client.events.list({
+                                "limit": 200,
+                                "active": True,
+                                "offset": eo,
+                            }),
+                        )
+                        extra_events = _extract_events(extra_data)
+                        if not extra_events:
+                            break
+                        all_markets.extend(_build_markets(extra_events))
+                    break
+                offset += 200
+
+            if not found:
+                logger.warning("Pagination exhausted to offset %d — no upcoming games found", offset)
+
             game_times = sorted(set(
                 m.get("gameStartTime", "")[:10]
-                for m in markets if m.get("gameStartTime")
+                for m in all_markets if m.get("gameStartTime")
             ))
-            logger.info("gameStartTime range in %d markets: %s … %s",
-                        len(markets),
-                        game_times[0] if game_times else "none",
-                        game_times[-1] if game_times else "none")
-            logger.info("gameStartTime dates sample: %s", game_times[-10:])
-            return markets
+            logger.info("gameStartTime latest dates across %d markets: %s",
+                        len(all_markets), game_times[-10:])
+            return all_markets
         except Exception as exc:
             logger.warning("US SDK events.list failed: %s — falling back to Gamma API", exc)
             return []
@@ -157,14 +214,11 @@ class PolymarketClient:
         # Skip completed/final games
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
-            logger.info("eventState raw: %s", event_state_raw)
             event_state = str(event_state_raw.get("status") or event_state_raw.get("state") or "").upper()
         else:
             event_state = str(event_state_raw or "").upper()
         if event_state in ("FINAL", "COMPLETED", "POST_GAME", "POSTGAME", "ENDED", "RESOLVED"):
             return False
-        if event_state:
-            logger.info("eventState=%s: %s", event_state, (market.get("question") or market.get("title") or "")[:50])
         text = " ".join([
             (market.get("question") or "").lower(),
             (market.get("title") or "").lower(),
@@ -357,7 +411,7 @@ class PolymarketClient:
 
         # marketSides — list of {side, price/probability} dicts
         sides = market.get("marketSides") or []
-        logger.info("marketSides for '%s': %r", question, sides)
+        logger.debug("marketSides for '%s': %r", question, sides)
         if sides:
             try:
                 if isinstance(sides, str):
@@ -371,7 +425,6 @@ class PolymarketClient:
                                     p = float(raw)
                                     if 0 < p < 1:
                                         return p
-                # fallback: just grab first numeric price in range
                 for s in sides:
                     if isinstance(s, dict):
                         for k in ("price", "probability", "lastPrice", "bestAsk", "bestBid"):
@@ -388,7 +441,7 @@ class PolymarketClient:
 
         # outcomes — list or dict
         outcomes = market.get("outcomes") or []
-        logger.info("outcomes for '%s': %r", question, outcomes)
+        logger.debug("outcomes for '%s': %r", question, outcomes)
         if outcomes:
             try:
                 if isinstance(outcomes, str):
@@ -421,7 +474,7 @@ class PolymarketClient:
         if token_id and len(str(token_id)) >= 32 and str(token_id).replace("-", "").isalnum():
             return await self.get_current_price(token_id)
 
-        logger.info("no-price fields for '%s': marketSides=%r outcomes=%r op=%r", question, sides, outcomes, op)
+        logger.debug("no-price fields for '%s': marketSides=%r outcomes=%r op=%r", question, sides, outcomes, op)
         return None
 
     def get_market_slug(self, market: dict) -> str:
@@ -451,7 +504,6 @@ class PolymarketClient:
     def seconds_to_resolution(self, market):
         raw = market.get("resolutionTime") or market.get("closeTime")
         if not raw:
-            # Fall back to gameStartTime + 4h (covers in-progress games; past games return negative)
             raw = market.get("gameStartTime")
             if not raw:
                 return None
