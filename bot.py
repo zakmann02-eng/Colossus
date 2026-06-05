@@ -104,7 +104,6 @@ async def _scan_markets_inner(
     position_mgr: PositionManager,
 ) -> None:
     if os.getenv("PAUSED", "false").lower() == "true":
-        # Auto-resume if we were paused due to low funds and balance has recovered
         if os.getenv("PAUSED_REASON") == "low_funds":
             balance = await client.get_balance()
             if balance >= MIN_TRADE_USD:
@@ -136,8 +135,6 @@ async def _scan_markets_inner(
     markets = await client.get_sports_markets(limit=200)
     logger.info("Found %d eligible markets", len(markets))
 
-    # Sort by volume but cap at 20 markets per event so one high-volume
-    # game (e.g. NBA Finals) can't crowd out all other sports
     markets.sort(key=lambda m: float(m.get("volume24hr") or m.get("volume24Hour") or 0), reverse=True)
     seen_events: dict[str, int] = {}
     capped: list[dict] = []
@@ -168,7 +165,6 @@ async def _scan_markets_inner(
         if signal is None:
             continue
 
-        # Skip if we already have an open position on this market (survives redeployments)
         if position_mgr.has_position(signal.market_slug):
             logger.info("SKIP already-positioned: %s", signal.market_slug)
             continue
@@ -250,7 +246,7 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         slug = (meta.get("slug") or p.get("marketSlug") or p.get("slug") or "unknown")[:30]
         outcome = meta.get("outcome") or ""
         net = p.get("netPosition") or p.get("netPositionDecimal") or "?"
-        # avgPx and cashValue are {value, currency} dicts
+        # avgPx and cashValue are {value, currency} dicts on Polymarket.US
         avg_px = p.get("avgPx") or p.get("avgPrice") or {}
         avg  = avg_px.get("value") if isinstance(avg_px, dict) else avg_px or "?"
         cash = p.get("cashValue") or {}
@@ -331,7 +327,6 @@ async def main() -> None:
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
-    # Register any positions already open on the exchange so TP/SL fires on them
     await pos_mgr.sync_from_exchange()
 
     mode = "Auto-trading" if trading_enabled else "Signal-alert mode (no client)"
