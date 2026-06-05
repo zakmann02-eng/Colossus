@@ -236,14 +236,20 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not positions:
         await update.message.reply_text("No open positions.")
         return
-    lines = ["*Open Positions*\n"]
+    lines = [f"*Open Positions* ({len(positions)})\n"]
     for p in positions:
         if not isinstance(p, dict):
+            lines.append(f"• (non-dict entry: {str(p)[:60]})")
             continue
-        slug = (p.get("marketSlug") or p.get("slug") or "")[:20]
-        size = p.get("size") or p.get("quantity") or "?"
-        avg  = p.get("avgPrice") or p.get("price") or "?"
-        lines.append(f"• `{slug}` size={size} avg={avg}")
+        slug = (p.get("marketSlug") or p.get("slug") or p.get("market") or p.get("name") or "unknown")[:25]
+        size = p.get("size") or p.get("quantity") or p.get("shares") or "?"
+        avg  = p.get("avgPrice") or p.get("price") or p.get("avgCost") or "?"
+        curr = p.get("currentPrice") or p.get("marketPrice") or p.get("lastPrice") or "?"
+        pnl  = p.get("percentPnl") or p.get("pnlPercent") or p.get("unrealizedPnlPercent") or "?"
+        lines.append(f"• `{slug}`\n  size={size} avg={avg} now={curr} pnl={pnl}%")
+    # If every position had no recognisable fields, show raw keys for diagnosis
+    if len(lines) == 1 and positions and isinstance(positions[0], dict):
+        lines.append(f"_(fields: {', '.join(positions[0].keys())})_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
