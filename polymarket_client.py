@@ -262,22 +262,33 @@ class PolymarketClient:
         return None
 
     async def has_liquidity(self, token_id: str, min_usd: float = 0.10) -> bool:
-        """Return True only if both bid and ask sides have enough depth to enter and exit."""
+        """Return True if the market has tradeable depth.
+
+        Polymarket.US runs its own order book independent of clob.polymarket.com.
+        We only use the CLOB as a hint when the token looks like a real CLOB hex ID;
+        otherwise assume liquidity exists and let the order attempt proceed.
+        A GTC order that finds no counterpart sits unfilled — no capital lost.
+        """
+        tid = str(token_id)
+        # Only query CLOB for proper hex token IDs (32+ chars); slugs/condition IDs
+        # are Polymarket.US-only and the CLOB will return empty books for them.
+        if len(tid) < 32 or not tid.replace("-", "").isalnum():
+            return True
         book = await self._get(f"{CLOB_API}/book", params={"token_id": token_id})
         if not book:
-            return False
+            return True
         bids = book.get("bids") or []
         asks = book.get("asks") or []
         if not bids or not asks:
-            logger.debug("No liquidity (empty book) for token %s…", str(token_id)[:12])
-            return False
-        # Sum top-3 levels on each side
+            logger.debug("Empty CLOB book for token %s… — assuming US liquidity", tid[:12])
+            return True
+        # Both sides present — verify minimum depth
         ask_depth = sum(float(a.get("size", 0)) for a in asks[:3])
         bid_depth = sum(float(b.get("size", 0)) for b in bids[:3])
         if ask_depth < min_usd or bid_depth < min_usd:
             logger.debug(
-                "Thin book for token %s… ask=%.2f bid=%.2f min=%.2f",
-                str(token_id)[:12], ask_depth, bid_depth, min_usd,
+                "Thin CLOB book for token %s… ask=%.2f bid=%.2f",
+                tid[:12], ask_depth, bid_depth,
             )
             return False
         return True
