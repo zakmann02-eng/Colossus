@@ -103,11 +103,11 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
 
     price = await client.get_market_price(market, token_id)
     if not price:
-        logger.debug("SKIP no-price: %s", question[:60])
+        logger.info("SKIP no-price (token=%s…): %s", str(token_id)[:16], question[:60])
         return None
 
     if price < MIN_PRICE or price > MAX_PRICE:
-        logger.debug("SKIP price(%.3f): %s", price, question[:60])
+        logger.info("SKIP price(%.3f): %s", price, question[:60])
         return None
 
     triggers: list[str] = []
@@ -131,7 +131,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         triggers.append(f"T4:days={secs/86400:.1f}")
 
     if not triggers:
-        logger.debug("SKIP no-triggers: %s", question[:60])
+        logger.info("SKIP no-triggers (price=%.2f): %s", price, question[:60])
         return None
 
     side = _decide_side(price)
@@ -139,7 +139,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
 
     # Reject markets with no active buyers/sellers — unfillable order = lost capital
     if not await client.has_liquidity(trade_token, min_usd=0.10):
-        logger.debug("SKIP no-liquidity: %s", question[:60])
+        logger.info("SKIP no-liquidity: %s", question[:60])
         return None
 
     amount, tp, sl, label = _size_position(len(triggers))
