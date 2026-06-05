@@ -42,11 +42,10 @@ T3_MULT = 1.5
 T4_SECS = 7 * 86_400
 
 _TIERS = {
-    1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.50, "tp": 0.08, "sl": 0.08},
-    2: {"label": "MED",  "min_usd": 0.50, "max_usd": 1.25, "tp": 0.12, "sl": 0.10},
-    3: {"label": "HIGH", "min_usd": 1.25, "max_usd": 2.00, "tp": 0.15, "sl": 0.10},
+    1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, ...},
+    2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, ...},
+    3: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, ...},
 }
-
 
 @dataclass
 class TradeSignal:
