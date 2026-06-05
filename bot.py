@@ -105,8 +105,20 @@ async def _scan_markets_inner(
     position_mgr: PositionManager,
 ) -> None:
     if os.getenv("PAUSED", "false").lower() == "true":
-        logger.info("Bot paused — skipping scan")
-        return
+        # Auto-resume if we were paused due to low funds and balance has recovered
+        if os.getenv("PAUSED_REASON") == "low_funds":
+            balance = await client.get_balance()
+            if balance >= MIN_TRADE_USD:
+                os.environ["PAUSED"] = "false"
+                os.environ.pop("PAUSED_REASON", None)
+                await _send(app, f"▶️ *Colossus auto-resumed* — balance restored (${balance:.2f})")
+                logger.info("Auto-resumed: balance $%.2f", balance)
+            else:
+                logger.info("Still paused — low funds ($%.2f)", balance)
+                return
+        else:
+            logger.info("Bot paused — skipping scan")
+            return
 
     logger.info("Scanning markets…")
     balance = await client.get_balance()
@@ -115,9 +127,11 @@ async def _scan_markets_inner(
         await _send(app, (
             f"⛔ *Colossus halted — insufficient funds*\n"
             f"Balance: ${balance:.2f} (minimum: ${MIN_TRADE_USD:.2f})\n"
-            f"Top up your account and use /resume to restart scanning."
+            f"Watching for funds — will auto-resume when balance recovers.\n"
+            f"Or deposit and the next scan will pick it up automatically."
         ))
         os.environ["PAUSED"] = "true"
+        os.environ["PAUSED_REASON"] = "low_funds"
         return
 
     markets = await client.get_sports_markets(limit=200)
@@ -298,6 +312,9 @@ async def main() -> None:
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
+
+    # Register any positions already open on the exchange so TP/SL fires on them
+    await pos_mgr.sync_from_exchange()
 
     mode = "Auto-trading" if trading_enabled else "Signal-alert mode (no client)"
     await _send(app, (
