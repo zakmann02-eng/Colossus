@@ -66,6 +66,51 @@ class PositionManager:
 
     # ── Public API ────────────────────────────────────────────────────
 
+    async def sync_from_exchange(self) -> None:
+        """Pull live open positions from the exchange and register any not yet tracked.
+
+        Called on startup so positions entered before a redeploy are monitored
+        for TP/SL without the user having to manually re-enter them.
+        """
+        try:
+            live = list(await self._client.get_open_positions() or [])
+        except Exception as exc:
+            logger.warning("sync_from_exchange: get_open_positions failed: %s", exc)
+            return
+
+        tracked_slugs = {e.market_slug for e in self._entries.values()}
+        added = 0
+        for p in live:
+            if not isinstance(p, dict):
+                continue
+            slug = p.get("marketSlug") or p.get("slug") or ""
+            if not slug or slug in tracked_slugs:
+                continue
+            intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
+            side = "NO" if ("SHORT" in intent or "NO" in intent) else "YES"
+            price = float(p.get("avgPrice") or p.get("price") or p.get("currentPrice") or 0.50)
+            size_usd = float(p.get("cashValue") or p.get("value") or p.get("size") or 0)
+            if price <= 0 or size_usd <= 0:
+                continue
+            # Use slug+side as synthetic key — CLOB price lookup will fall back gracefully
+            token_id = f"sync_{slug}_{side}"
+            self._entries[token_id] = _Entry(
+                market_slug = slug,
+                side        = side,
+                price       = price,
+                tp          = self._default_tp,
+                sl          = self._default_sl,
+                amount_usd  = size_usd,
+            )
+            tracked_slugs.add(slug)
+            added += 1
+
+        if added:
+            self._save()
+            logger.info("Synced %d live position(s) from exchange into TP/SL tracker", added)
+        else:
+            logger.info("sync_from_exchange: no new positions to register")
+
     def record_entry(
         self,
         token_id:    str,
@@ -139,7 +184,7 @@ class PositionManager:
                 continue
             slug = p.get("marketSlug") or p.get("slug") or ""
             if not slug or slug in tracked_slugs:
-                continue
+                continue  # already handled above
             intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
             side = "NO" if ("SHORT" in intent or "NO" in intent) else "YES"
             price = float(p.get("currentPrice") or p.get("price") or p.get("avgPrice") or 0.50)
@@ -176,6 +221,7 @@ class PositionManager:
                 await self._client.close_position(
                     entry.market_slug, entry.side, current_price, half_usd
                 )
+                # Keep position but halve the tracked size
                 self._entries[token_id] = _Entry(
                     market_slug = entry.market_slug,
                     side        = entry.side,
