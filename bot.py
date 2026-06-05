@@ -192,12 +192,18 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     client: PolymarketClient = ctx.bot_data["client"]
-    positions = await client.get_open_positions()
+    raw = await client.get_open_positions()
+    try:
+        positions = list(raw)[:10] if raw else []
+    except Exception:
+        positions = []
     if not positions:
         await update.message.reply_text("No open positions.")
         return
     lines = ["*Open Positions*\n"]
-    for p in positions[:10]:
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
         slug = (p.get("marketSlug") or p.get("slug") or "")[:20]
         size = p.get("size") or p.get("quantity") or "?"
         avg  = p.get("avgPrice") or p.get("price") or "?"
