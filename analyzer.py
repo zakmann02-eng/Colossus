@@ -13,9 +13,9 @@ Any 1 trigger fires a trade:
   T4  Resolves within 48h (imminent resolution — tight time window)
 
 Position sizing by triggers fired:
-  1 trigger  → LOW  → $0.10–$0.35  · TP 8%  · SL 12%
-  2 triggers → MED  → $0.35–$0.65  · TP 12% · SL 15%
-  3+ triggers→ HIGH → $0.65–$1.00  · TP 15% · SL 15%
+  1 trigger  → LOW  → $0.10–$0.35  · TP 20% · SL 5%
+  2 triggers → MED  → $0.35–$0.65  · TP 25% · SL 8%
+  3+ triggers→ HIGH → $0.65–$1.00  · TP 30% · SL 10%
 """
 
 from __future__ import annotations
@@ -43,9 +43,9 @@ T3_MULT = 1.5
 T4_SECS = 2 * 86_400   # tightened: 48h (was 7 days — always fired, added no signal)
 
 _TIERS = {
-    1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, "tp": 0.08, "sl": 0.12},
-    2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.12, "sl": 0.15},
-    3: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.15, "sl": 0.15},
+    1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, "tp": 0.20, "sl": 0.05},
+    2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.25, "sl": 0.08},
+    3: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.30, "sl": 0.10},
 }
 
 
@@ -88,8 +88,18 @@ def _parse_ts(raw) -> float:
         return 0.0
 
 
-def _decide_side(price: float) -> str:
-    return "NO" if price > 0.50 else "YES"
+def _decide_side(price: float, market: dict | None = None) -> str:
+    # For near-50/50 markets use momentum: if price has been moving up (best ask
+    # rising), lean YES; if falling, lean NO. Fall back to slight favorite side
+    # (above 0.50 → YES is already the favorite, follow it).
+    if market:
+        best_ask = _safe_float(market.get("bestAsk") or market.get("bestAskPrice"))
+        best_bid = _safe_float(market.get("bestBid") or market.get("bestBidPrice"))
+        if best_ask > 0 and best_bid > 0:
+            mid = (best_ask + best_bid) / 2
+            return "YES" if mid >= 0.50 else "NO"
+    # Default: follow the favorite (majority is right more often than not)
+    return "YES" if price >= 0.50 else "NO"
 
 
 def _size_position(n_triggers: int) -> tuple[float, float, float, str]:
@@ -156,7 +166,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         logger.info("SKIP no-triggers (price=%.2f): %s", price, question[:60])
         return None
 
-    side = _decide_side(price)
+    side = _decide_side(price, market)
     trade_token = token_id if side == "YES" else (client.resolve_token_id(market, "NO") or token_id)
 
     if not await client.has_liquidity(trade_token, min_usd=0.10):
