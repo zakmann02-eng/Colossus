@@ -117,6 +117,11 @@ async def _scan_markets_inner(
     markets = await client.get_sports_markets(limit=200)
     logger.info("Found %d eligible markets", len(markets))
 
+    # Sort by 24h volume descending and cap at 300 to keep scans under 60s
+    markets.sort(key=lambda m: float(m.get("volume24hr") or m.get("volume24Hour") or 0), reverse=True)
+    markets = markets[:300]
+    logger.info("Evaluating top %d markets by volume", len(markets))
+
     signals_fired = 0
 
     for market in markets:
