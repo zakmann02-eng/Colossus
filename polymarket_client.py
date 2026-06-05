@@ -256,6 +256,27 @@ class PolymarketClient:
                 pass
         return None
 
+    async def has_liquidity(self, token_id: str, min_usd: float = 0.10) -> bool:
+        """Return True only if both bid and ask sides have enough depth to enter and exit."""
+        book = await self._get(f"{CLOB_API}/book", params={"token_id": token_id})
+        if not book:
+            return False
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        if not bids or not asks:
+            logger.debug("No liquidity (empty book) for token %s…", str(token_id)[:12])
+            return False
+        # Sum top-3 levels on each side
+        ask_depth = sum(float(a.get("size", 0)) for a in asks[:3])
+        bid_depth = sum(float(b.get("size", 0)) for b in bids[:3])
+        if ask_depth < min_usd or bid_depth < min_usd:
+            logger.debug(
+                "Thin book for token %s… ask=%.2f bid=%.2f min=%.2f",
+                str(token_id)[:12], ask_depth, bid_depth, min_usd,
+            )
+            return False
+        return True
+
     # ---------------------------------------------------------------- #
     # Account                                                           #
     # ---------------------------------------------------------------- #
