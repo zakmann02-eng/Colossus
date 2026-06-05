@@ -35,6 +35,7 @@ class PolymarketClient:
         self._us_client  = self._init_us_client()
         self._market_cache: dict = {}
         self._slug_map: dict[str, str] = {}
+        self._upcoming_offset: int = 0
         logger.info("PolymarketClient ready — key_id %s…", self._key_id[:8])
 
     def _init_us_client(self):
@@ -128,65 +129,48 @@ class PolymarketClient:
                     pass
             return False
 
-        try:
-            # Pass 1: try sort by gameStartTime DESC — fast path if API honours it
+        async def _fetch_page(off: int) -> list:
+            o = off
             data = await loop.run_in_executor(
                 None,
                 lambda: self._us_client.events.list({
                     "limit": 200,
                     "active": True,
-                    "order": "gameStartTime",
-                    "ascending": False,
+                    "offset": o,
                 }),
             )
-            events = _extract_events(data)
-            if events:
-                logger.info("US SDK pass-1: %d events, sample keys: %s", len(events), list(events[0].keys()))
-            markets = _build_markets(events)
+            return _extract_events(data)
 
-            if _upcoming_in(markets):
-                logger.info("Pass 1 found upcoming games — %d markets total", len(markets))
-                return markets
+        try:
+            all_markets: list[dict] = []
 
-            # Pass 2: API ignores sort; paginate forward until we find upcoming games
-            # NBA regular season ~1,230 events; Finals at ~1,300+
-            logger.info("Pass 1: no upcoming games found — paginating (200/page) to find them")
-            all_markets = list(markets)
-            offset = 200
-            max_offset = 2000
+            start_offset = max(0, self._upcoming_offset - 200)
+            if start_offset > 0:
+                logger.info("Jumping to cached offset %d to find upcoming games", start_offset)
+
             found = False
+            offset = start_offset
+            max_offset = start_offset + 2000
+
             while offset <= max_offset:
-                off = offset  # capture for lambda
-                page_data = await loop.run_in_executor(
-                    None,
-                    lambda: self._us_client.events.list({
-                        "limit": 200,
-                        "active": True,
-                        "offset": off,
-                    }),
-                )
-                page_events = _extract_events(page_data)
+                page_events = await _fetch_page(offset)
                 if not page_events:
-                    logger.info("Pagination stopped at offset %d — no more events", off)
+                    logger.info("Pagination stopped at offset %d — no more events", offset)
                     break
                 page_markets = _build_markets(page_events)
                 all_markets.extend(page_markets)
-                logger.info("Paginated offset=%d: +%d markets (%d total)", off, len(page_markets), len(all_markets))
+                if offset == start_offset and page_events:
+                    logger.info("SDK page offset=%d: %d events, sample keys: %s",
+                                offset, len(page_events), list(page_events[0].keys()))
+                else:
+                    logger.info("Paginated offset=%d: +%d markets (%d total)",
+                                offset, len(page_markets), len(all_markets))
                 if _upcoming_in(page_markets):
-                    logger.info("Found upcoming games at offset %d", off)
+                    logger.info("Found upcoming games at offset %d — caching", offset)
+                    self._upcoming_offset = offset
                     found = True
-                    # Fetch a few more pages to get all upcoming events
-                    for extra_off in range(off + 200, off + 600, 200):
-                        eo = extra_off
-                        extra_data = await loop.run_in_executor(
-                            None,
-                            lambda: self._us_client.events.list({
-                                "limit": 200,
-                                "active": True,
-                                "offset": eo,
-                            }),
-                        )
-                        extra_events = _extract_events(extra_data)
+                    for extra_off in range(offset + 200, offset + 800, 200):
+                        extra_events = await _fetch_page(extra_off)
                         if not extra_events:
                             break
                         all_markets.extend(_build_markets(extra_events))
@@ -194,7 +178,11 @@ class PolymarketClient:
                 offset += 200
 
             if not found:
-                logger.warning("Pagination exhausted to offset %d — no upcoming games found", offset)
+                if start_offset > 0:
+                    logger.warning("No upcoming games at cached offset %d — resetting cache", start_offset)
+                    self._upcoming_offset = 0
+                else:
+                    logger.warning("Pagination exhausted to offset %d — no upcoming games found", offset)
 
             game_times = sorted(set(
                 m.get("gameStartTime", "")[:10]
@@ -211,7 +199,6 @@ class PolymarketClient:
         if not market.get("active", True) or market.get("closed", False):
             logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
-        # Skip completed/final games
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
             event_state = str(event_state_raw.get("status") or event_state_raw.get("state") or "").upper()
