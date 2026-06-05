@@ -2,12 +2,12 @@
 Trigger evaluation and trade decision logic.
 
 Pre-filters (all must pass):
-  - Price between 0.05 and 0.95
+  - Price between 0.30 and 0.70 (genuine uncertainty only — no heavy underdogs/favorites)
   - Minimum $100 24h volume
   - Must resolve within 7 days (weekly/daily trading)
 
 Any 1 trigger fires a trade:
-  T1  Price outside 48-52% range
+  T1  Price inside 40-60% range (coin-flip uncertainty — market is genuinely unsettled)
   T2  Price moved >= 1% in last 15 min
   T3  24h volume > 1.5x daily average
   T4  Resolves within 7 days (always fires for near-term markets)
@@ -30,13 +30,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MIN_PRICE    = 0.05
-MAX_PRICE    = 0.95
+MIN_PRICE    = 0.30   # reject heavy underdogs — no edge buying 26% teams
+MAX_PRICE    = 0.70   # reject heavy favorites — almost no upside movement left
 MIN_VOL_24H  = 100.0
 MAX_DAYS_OUT = 7 * 86_400
 
-T1_LOW  = 0.48
-T1_HIGH = 0.52
+T1_LOW  = 0.40   # fire when price IS near 50/50 — genuine uncertainty
+T1_HIGH = 0.60
 T2_MOVE = 0.01
 T3_MULT = 1.5
 T4_SECS = 7 * 86_400
@@ -112,7 +112,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
 
     triggers: list[str] = []
 
-    if price < T1_LOW or price > T1_HIGH:
+    if T1_LOW <= price <= T1_HIGH:
         triggers.append(f"T1:prob={price:.2f}")
 
     price_15m = await client.get_price_15min_ago(market, token_id)
