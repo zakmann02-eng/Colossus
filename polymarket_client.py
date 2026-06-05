@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import aiohttp
 
@@ -325,7 +325,14 @@ class PolymarketClient:
             data = await loop.run_in_executor(None, self._us_client.portfolio.positions)
             if not data:
                 return []
-            return data if isinstance(data, list) else data.get("positions", [])
+            if isinstance(data, list):
+                return data
+            for key in ("positions", "data", "items", "portfolio", "results"):
+                val = data.get(key)
+                if isinstance(val, list):
+                    return val
+            logger.warning("get_open_positions: unrecognised response shape — keys: %s", list(data.keys()) if isinstance(data, dict) else type(data))
+            return []
         except Exception as exc:
             logger.warning("get_open_positions failed: %s", exc)
             return []
