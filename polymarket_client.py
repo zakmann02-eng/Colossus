@@ -106,96 +106,120 @@ class PolymarketClient:
 
         now_ts = time.time()
 
-        def _upcoming_in(markets):
-            for m in markets:
-                # Check resolutionTime/closeTime first (set for upcoming markets),
-                # then gameStartTime (set for past games)
-                for field in ("resolutionTime", "closeTime", "gameStartTime"):
-                    raw = m.get(field)
-                    if not raw:
-                        continue
-                    try:
-                        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
-                        if field == "gameStartTime":
-                            ts += 4 * 3600  # game + buffer
-                        if ts > now_ts:
-                            return True
-                    except Exception:
-                        pass
-            return False
+        def _parse_ts(raw) -> float:
+            """Parse a timestamp from int/float/ISO string. Returns 0 on failure."""
+            if raw is None:
+                return 0.0
+            try:
+                ts = float(raw)
+                if ts > 1_000_000_000:  # sanity: must be after 2001
+                    return ts
+            except (TypeError, ValueError):
+                pass
+            try:
+                return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                return 0.0
 
-        async def _fetch_page(off: int) -> list:
-            o = off
+        def _best_ts(m: dict) -> float:
+            """Return the most relevant timestamp for a market (0 if none)."""
+            for field in ("resolutionTime", "closeTime", "startDate", "gameStartTime", "endDate"):
+                ts = _parse_ts(m.get(field))
+                if ts > 0:
+                    if field == "gameStartTime":
+                        ts += 4 * 3600  # game resolution after start
+                    return ts
+            return 0.0
+
+        def _upcoming_in(markets) -> bool:
+            return any(_best_ts(m) > now_ts for m in markets)
+
+        async def _fetch_page(params: dict) -> list[dict]:
             data = await loop.run_in_executor(
                 None,
-                lambda: self._us_client.events.list({
-                    "limit": 200,
-                    "offset": o,
-                }),
+                lambda p=params: self._us_client.events.list(p),
             )
-            return _extract_events(data)
+            return _build_markets(_extract_events(data))
+
+        def _fmt_ts(ts: float) -> str:
+            if ts <= 0:
+                return "no-date"
+            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
         try:
-            all_markets: list[dict] = []
+            # ── Strategy 1: filter params that may return upcoming events at offset 0 ──
+            filter_strategies = [
+                {"limit": 200, "closed": False},
+                {"limit": 200, "active": True, "closed": False},
+                {"limit": 200, "sort": "startDate",     "direction": "desc"},
+                {"limit": 200, "sort": "gameStartTime", "direction": "desc"},
+                {"limit": 200, "status": "UPCOMING"},
+            ]
+            for params in filter_strategies:
+                try:
+                    markets = await _fetch_page(params)
+                    if not markets:
+                        continue
+                    dates = sorted(_best_ts(m) for m in markets if _best_ts(m) > 0)
+                    latest = _fmt_ts(dates[-1]) if dates else "no-date"
+                    logger.info("Filter %s → %d events, latest date %s", params, len(markets), latest)
+                    if _upcoming_in(markets):
+                        n_up = sum(1 for m in markets if _best_ts(m) > now_ts)
+                        logger.info("Filter strategy found %d upcoming markets", n_up)
+                        return markets
+                except Exception as exc:
+                    logger.debug("Filter %s failed: %s", params, exc)
 
-            # If cached, jump near that offset; otherwise coarse-scan in 500-event steps
-            # to find upcoming games across ANY sport without assuming NBA position
+            # ── Strategy 2: extended offset scan with per-page date diagnostics ──
             if self._upcoming_offset > 0:
-                start_offset = max(0, self._upcoming_offset - 200)
-                step = 200
-                logger.info("Jumping to cached offset %d", start_offset)
+                scan_offsets = list(range(max(0, self._upcoming_offset - 200),
+                                         self._upcoming_offset + 1200, 200))
+                logger.info("Jumping to cached offset %d", self._upcoming_offset)
             else:
-                start_offset = 0
-                step = 500  # coarse steps to cover 5000+ events quickly
+                # 1000-step scan covers 30k events (≈150 API calls max, breaks early)
+                scan_offsets = list(range(0, 30_001, 1000))
 
-            found = False
-            offset = start_offset
-
-            while offset <= start_offset + 5000:
-                page_events = await _fetch_page(offset)
-                if not page_events:
-                    if step == 500 and offset > 0:
-                        # Coarse scan ran out — no upcoming games exist
-                        break
-                    logger.info("Pagination stopped at offset %d — no more events", offset)
+            all_markets: list[dict] = []
+            for offset in scan_offsets:
+                try:
+                    page = await _fetch_page({"limit": 200, "offset": offset})
+                except Exception as exc:
+                    logger.debug("Offset %d failed: %s", offset, exc)
+                    continue
+                if not page:
+                    logger.info("Pagination ended at offset %d", offset)
                     break
-                page_markets = _build_markets(page_events)
-                logger.info("Scanned offset=%d: %d events", offset, len(page_events))
+                dates = sorted(_best_ts(m) for m in page if _best_ts(m) > 0)
+                rng   = f"{_fmt_ts(dates[0])} → {_fmt_ts(dates[-1])}" if dates else "no dates"
+                logger.info("Offset %d: %d events, dates %s", offset, len(page), rng)
 
-                if _upcoming_in(page_markets):
+                if _upcoming_in(page):
                     logger.info("Found upcoming games at offset %d — caching", offset)
                     self._upcoming_offset = offset
-                    found = True
-                    # Collect this page plus next 600 events to catch all live/upcoming markets
-                    all_markets.extend(page_markets)
+                    all_markets.extend(page)
                     for extra_off in range(offset + 200, offset + 800, 200):
-                        extra_events = await _fetch_page(extra_off)
-                        if not extra_events:
+                        try:
+                            extra = await _fetch_page({"limit": 200, "offset": extra_off})
+                        except Exception:
                             break
-                        extra_markets = _build_markets(extra_events)
-                        all_markets.extend(extra_markets)
-                        if not _upcoming_in(extra_markets):
-                            break  # past the live window
+                        if not extra:
+                            break
+                        all_markets.extend(extra)
+                        if not _upcoming_in(extra):
+                            break
                     break
 
-                offset += step
-
-            if not found:
+            if not all_markets:
                 if self._upcoming_offset > 0:
                     logger.warning("Cached offset %d stale — resetting", self._upcoming_offset)
                     self._upcoming_offset = 0
                 else:
-                    logger.warning("Coarse scan to offset %d found no upcoming games", offset)
+                    logger.warning("Extended scan found no upcoming games in first 30k events")
 
-            game_times = sorted(set(
-                m.get("gameStartTime", "")[:10]
-                for m in all_markets if m.get("gameStartTime")
-            ))
-            logger.info("gameStartTime latest dates across %d markets: %s",
-                        len(all_markets), game_times[-10:])
             return all_markets
+
         except Exception as exc:
-            logger.warning("US SDK events.list failed: %s — falling back to Gamma API", exc)
+            logger.warning("US SDK events.list failed: %s", exc)
             return []
 
     def _is_allowed(self, market):
