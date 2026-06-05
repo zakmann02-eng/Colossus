@@ -150,12 +150,40 @@ class PositionManager:
                     if not isinstance(p, dict):
                         continue
                     slug = p.get("marketSlug") or p.get("slug") or ""
-                    if slug == entry.market_slug:
-                        raw = p.get("currentPrice") or p.get("price") or p.get("lastPrice")
-                        if raw:
-                            return float(raw)
+                    if slug != entry.market_slug:
+                        continue
+                    # Try explicit current-price fields
+                    for field in ("currentPrice", "marketPrice", "lastPrice",
+                                  "lastTradePrice", "markPrice"):
+                        raw = p.get(field)
+                        if raw is not None:
+                            try:
+                                val = float(raw)
+                                if 0 < val <= 1:
+                                    return val
+                            except (TypeError, ValueError):
+                                pass
+                    # Compute from current value ÷ share count
+                    curr_val = float(p.get("currentValue") or p.get("cashValue") or p.get("value") or 0)
+                    size = float(p.get("size") or p.get("quantity") or p.get("shares") or 0)
+                    if curr_val > 0 and size > 0:
+                        return curr_val / size
+                    # Back-calculate from percentPnl if available
+                    raw_pnl = p.get("percentPnl") or p.get("unrealizedPnlPercent") or p.get("pnlPercent")
+                    if raw_pnl is not None and entry.price > 0:
+                        try:
+                            pnl = float(raw_pnl)
+                            # API may return e.g. -51.0 (percent) or -0.51 (fraction)
+                            if abs(pnl) > 1:
+                                pnl /= 100
+                            return entry.price * (1 + pnl)
+                        except (TypeError, ValueError):
+                            pass
+                    # Log full position so we can see actual field names in Railway logs
+                    logger.info("Cannot resolve current price for %s — raw position: %s",
+                                entry.market_slug, p)
             except Exception as exc:
-                logger.debug("Portfolio price lookup failed for %s: %s", entry.market_slug, exc)
+                logger.warning("Portfolio price lookup failed for %s: %s", entry.market_slug, exc)
             return None
         return await self._client.get_current_price(token_id)
 
