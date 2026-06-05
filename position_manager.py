@@ -110,6 +110,8 @@ class PositionManager:
             logger.info("Synced %d live position(s) from exchange into TP/SL tracker", added)
         else:
             logger.info("sync_from_exchange: no new positions to register")
+        if live:
+            logger.info("Raw portfolio position sample: %s", live[0])
 
     def record_entry(
         self,
