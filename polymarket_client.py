@@ -188,6 +188,11 @@ class PolymarketClient:
         if not market.get("active", True) or market.get("closed", False):
             logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
+        # Pre-filter already-resolved markets before volume sort can promote them
+        secs = self.seconds_to_resolution(market)
+        if secs is not None and secs <= 0:
+            logger.debug("BLOCKED resolved(%.1fd ago): %s", abs(secs) / 86400, (market.get("question") or "")[:60])
+            return False
         # Skip completed/final games
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
