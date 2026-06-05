@@ -215,6 +215,26 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("▶️ Bot resumed.")
 
 
+async def cmd_sellall(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    pos_mgr: PositionManager = ctx.bot_data["pos_mgr"]
+    await update.message.reply_text("🏳️ Closing all open positions…")
+    count = await pos_mgr.sell_all()
+    if count:
+        await update.message.reply_text(f"Done — {count} position(s) closed.")
+    else:
+        await update.message.reply_text("No tracked positions to close.")
+
+
+async def cmd_sellhalf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    pos_mgr: PositionManager = ctx.bot_data["pos_mgr"]
+    await update.message.reply_text("✂️ Selling half of each open position…")
+    count = await pos_mgr.sell_half()
+    if count:
+        await update.message.reply_text(f"Done — halved {count} position(s).")
+    else:
+        await update.message.reply_text("No tracked positions to sell.")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
@@ -227,12 +247,15 @@ async def main() -> None:
     app     = Application.builder().token(TELEGRAM_TOKEN).build()
     pos_mgr = PositionManager(client, app, TELEGRAM_CHAT, TP_PCT, SL_PCT)
 
-    app.bot_data["client"] = client
+    app.bot_data["client"]  = client
+    app.bot_data["pos_mgr"] = pos_mgr
 
     app.add_handler(CommandHandler("status",    cmd_status))
     app.add_handler(CommandHandler("positions", cmd_positions))
     app.add_handler(CommandHandler("pause",     cmd_pause))
     app.add_handler(CommandHandler("resume",    cmd_resume))
+    app.add_handler(CommandHandler("sellall",   cmd_sellall))
+    app.add_handler(CommandHandler("sellhalf",  cmd_sellhalf))
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -254,7 +277,7 @@ async def main() -> None:
         f"Mode: {mode}\n"
         f"Scanning every {SCAN_INTERVAL}s · TP {TP_PCT:.0%} · SL {SL_PCT:.0%}\n"
         f"Trade range: ${MIN_TRADE_USD:.2f}–${MAX_TRADE_USD:.2f}\n"
-        "Commands: /status /positions /pause /resume"
+        "Commands: /status /positions /pause /resume /sellall /sellhalf"
     ))
 
     logger.info("Bot running. Press Ctrl+C to stop.")
