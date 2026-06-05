@@ -8,21 +8,23 @@ Pre-filters (all must pass):
 
 Any 1 trigger fires a trade:
   T1  Price inside 40-60% range (coin-flip uncertainty — market is genuinely unsettled)
-  T2  Price moved >= 1% in last 15 min
-  T3  24h volume > 1.5x daily average
-  T4  Resolves within 7 days (always fires for near-term markets)
+  T2  Game is currently in-play (started but not yet resolved — live volatility)
+  T3  24h volume > 1.5x daily average (unusual interest)
+  T4  Resolves within 48h (imminent resolution — tight time window)
 
 Position sizing by triggers fired:
-  1 trigger  → LOW  → $0.10–$0.35  · TP 8%  · SL 8%
-  2 triggers → MED  → $0.35–$0.65  · TP 12% · SL 10%
-  3+ triggers→ HIGH → $0.65–$1.00  · TP 15% · SL 10%
+  1 trigger  → LOW  → $0.10–$0.35  · TP 8%  · SL 12%
+  2 triggers → MED  → $0.35–$0.65  · TP 12% · SL 15%
+  3+ triggers→ HIGH → $0.65–$1.00  · TP 15% · SL 15%
 """
 
 from __future__ import annotations
 
 import logging
 import random
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,21 +32,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MIN_PRICE    = 0.25   # reject extreme underdogs/favorites
-MAX_PRICE    = 0.75   # T2/T3/T4 can still fire in 25-40% and 60-75% zones
+MIN_PRICE    = 0.25
+MAX_PRICE    = 0.75
 MIN_VOL_24H  = 100.0
 MAX_DAYS_OUT = 7 * 86_400
 
-T1_LOW  = 0.40   # fire when price IS near 50/50 — genuine uncertainty
+T1_LOW  = 0.40
 T1_HIGH = 0.60
-T2_MOVE = 0.01
 T3_MULT = 1.5
-T4_SECS = 7 * 86_400
+T4_SECS = 2 * 86_400   # tightened: 48h (was 7 days — always fired, added no signal)
 
 _TIERS = {
-    1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, "tp": 0.08, "sl": 0.08},
-    2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.12, "sl": 0.10},
-    3: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.15, "sl": 0.10},
+    1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, "tp": 0.08, "sl": 0.12},
+    2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.12, "sl": 0.15},
+    3: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.15, "sl": 0.15},
 }
 
 
@@ -61,7 +62,7 @@ class TradeSignal:
     event_date:  str       = "N/A"
     amount_usd:  float     = 0.50
     tp_pct:      float     = 0.08
-    sl_pct:      float     = 0.08
+    sl_pct:      float     = 0.12
     conviction:  str       = "LOW"
 
 
@@ -70,6 +71,21 @@ def _safe_float(val, default: float = 0.0) -> float:
         return float(val)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_ts(raw) -> float:
+    if raw is None:
+        return 0.0
+    try:
+        ts = float(raw)
+        if ts > 1_000_000_000:
+            return ts
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
 
 
 def _decide_side(price: float) -> str:
@@ -112,24 +128,29 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         return None
 
     triggers: list[str] = []
+    now = time.time()
 
+    # T1: price near 50/50 — genuinely contested market
     if T1_LOW <= price <= T1_HIGH:
         triggers.append(f"T1:prob={price:.2f}")
 
-    price_15m = await client.get_price_15min_ago(market, token_id)
-    if price_15m and price_15m > 0:
-        move = abs(price - price_15m) / price_15m
-        if move >= T2_MOVE:
-            triggers.append(f"T2:move={move:.1%}")
+    # T2: game is currently live (started but not yet resolved)
+    game_start_raw = market.get("gameStartTime") or market.get("startTime") or market.get("startDate")
+    if game_start_raw:
+        start_ts = _parse_ts(game_start_raw)
+        if 0 < start_ts < now:
+            triggers.append("T2:live")
 
+    # T3: 24h volume is unusually high relative to historical daily average
     vol_all   = _safe_float(market.get("volume") or market.get("volumeNum"))
     days_est  = max(1.0, _safe_float(market.get("daysAgo"), 7.0))
     daily_avg = vol_all / days_est if vol_all else 0
     if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
 
+    # T4: resolves within 48h — imminent outcome, tighter edge window
     if secs is not None and 0 < secs <= T4_SECS:
-        triggers.append(f"T4:days={secs/86400:.1f}")
+        triggers.append(f"T4:hrs={secs/3600:.0f}h")
 
     if not triggers:
         logger.info("SKIP no-triggers (price=%.2f): %s", price, question[:60])
@@ -138,13 +159,12 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     side = _decide_side(price)
     trade_token = token_id if side == "YES" else (client.resolve_token_id(market, "NO") or token_id)
 
-    # Reject markets with no active buyers/sellers — unfillable order = lost capital
     if not await client.has_liquidity(trade_token, min_usd=0.10):
         logger.info("SKIP no-liquidity: %s", question[:60])
         return None
 
     amount, tp, sl, label = _size_position(len(triggers))
-    score              = min(100, 25 + len(triggers) * 25)
+    score = min(100, 25 + len(triggers) * 25)
 
     signal = TradeSignal(
         market_id   = market_id,
@@ -163,7 +183,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     )
 
     logger.info(
-        "Signal: %s | %s @ %.2f | slug=%s conviction=%s amount=$%.2f",
-        question[:50], side, price, market_slug or "NO-SLUG", label, amount,
+        "Signal: %s | %s @ %.2f | slug=%s conviction=%s amount=$%.2f triggers=%s",
+        question[:50], side, price, market_slug or "NO-SLUG", label, amount, triggers,
     )
     return signal
