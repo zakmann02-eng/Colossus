@@ -83,13 +83,25 @@ class PositionManager:
         for p in live:
             if not isinstance(p, dict):
                 continue
-            slug = p.get("marketSlug") or p.get("slug") or ""
+            # Slug is nested inside marketMetadata on Polymarket.US
+            meta = p.get("marketMetadata") or {}
+            slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
             if not slug or slug in tracked_slugs:
                 continue
+            # Side: prefer explicit intent/side, fall back to netPosition sign (negative = NO/short)
             intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
-            side = "NO" if ("SHORT" in intent or "NO" in intent) else "YES"
-            price = float(p.get("avgPrice") or p.get("price") or p.get("currentPrice") or 0.50)
-            size_usd = float(p.get("cashValue") or p.get("value") or p.get("size") or 0)
+            if "SHORT" in intent or "NO" in intent:
+                side = "NO"
+            elif "LONG" in intent or "YES" in intent:
+                side = "YES"
+            else:
+                net = float(p.get("netPosition") or p.get("netPositionDecimal") or 0)
+                side = "NO" if net < 0 else "YES"
+            # avgPx and cashValue are {value, currency} dicts on Polymarket.US
+            avg_px = p.get("avgPx") or p.get("avgPrice") or p.get("price") or {}
+            price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
+            cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
+            size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
             if price <= 0 or size_usd <= 0:
                 continue
             # Use slug+side as synthetic key — CLOB price lookup will fall back gracefully
@@ -167,10 +179,11 @@ class PositionManager:
             for p in (positions or []):
                 if not isinstance(p, dict):
                     continue
-                slug = p.get("marketSlug") or p.get("slug") or ""
+                meta = p.get("marketMetadata") or {}
+                slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
                 if slug != entry.market_slug:
                     continue
-                # Try explicit current-price fields
+                # Try explicit current-price fields (flat)
                 for field in ("currentPrice", "marketPrice", "lastPrice",
                               "lastTradePrice", "markPrice"):
                     raw = p.get(field)
@@ -181,11 +194,17 @@ class PositionManager:
                                 return val
                         except (TypeError, ValueError):
                             pass
-                # Compute from current value ÷ share count
-                curr_val = float(p.get("currentValue") or p.get("cashValue") or p.get("value") or 0)
-                size = float(p.get("size") or p.get("quantity") or p.get("shares") or 0)
-                if curr_val > 0 and size > 0:
-                    return curr_val / size
+                # cashValue / |netPosition| — both may be dicts on Polymarket.US
+                cash = p.get("cashValue") or p.get("currentValue") or p.get("value") or {}
+                curr_val = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
+                net_pos = abs(float(p.get("netPosition") or p.get("netPositionDecimal") or 0))
+                if curr_val > 0 and net_pos > 0:
+                    return curr_val / net_pos
+                # costPerShare is the per-share price on Polymarket.US
+                cps = p.get("costPerShare") or {}
+                cps_val = float(cps.get("value") if isinstance(cps, dict) else cps or 0)
+                if 0 < cps_val <= 1:
+                    return cps_val
                 # Back-calculate from percentPnl if available
                 raw_pnl = p.get("percentPnl") or p.get("unrealizedPnlPercent") or p.get("pnlPercent")
                 if raw_pnl is not None and entry.price > 0:
@@ -250,13 +269,22 @@ class PositionManager:
         for p in live_list:
             if not isinstance(p, dict):
                 continue
-            slug = p.get("marketSlug") or p.get("slug") or ""
+            meta = p.get("marketMetadata") or {}
+            slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
             if not slug or slug in tracked_slugs:
                 continue  # already handled above
             intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
-            side = "NO" if ("SHORT" in intent or "NO" in intent) else "YES"
-            price = float(p.get("currentPrice") or p.get("price") or p.get("avgPrice") or 0.50)
-            size_usd = float(p.get("cashValue") or p.get("value") or p.get("size") or 0)
+            if "SHORT" in intent or "NO" in intent:
+                side = "NO"
+            elif "LONG" in intent or "YES" in intent:
+                side = "YES"
+            else:
+                net = float(p.get("netPosition") or p.get("netPositionDecimal") or 0)
+                side = "NO" if net < 0 else "YES"
+            avg_px = p.get("avgPx") or p.get("currentPrice") or p.get("price") or p.get("avgPrice") or {}
+            price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
+            cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
+            size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
             if size_usd <= 0:
                 continue
             try:
