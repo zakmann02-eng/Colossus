@@ -2,7 +2,7 @@
 Trigger evaluation and trade decision logic.
 
 Pre-filters (all must pass):
-  - Price between 0.30 and 0.70 (genuine uncertainty only — no heavy underdogs/favorites)
+  - Price between 0.25 and 0.75 (no extreme underdogs/favorites)
   - Minimum $100 24h volume
   - Must resolve within 7 days (weekly/daily trading)
 
@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MIN_PRICE    = 0.30   # reject heavy underdogs — no edge buying 26% teams
-MAX_PRICE    = 0.70   # reject heavy favorites — almost no upside movement left
+MIN_PRICE    = 0.25   # reject extreme underdogs/favorites
+MAX_PRICE    = 0.75   # T2/T3/T4 can still fire in 25-40% and 60-75% zones
 MIN_VOL_24H  = 100.0
 MAX_DAYS_OUT = 7 * 86_400
 
