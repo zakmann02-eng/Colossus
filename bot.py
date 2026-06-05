@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import random
 import sys
 from datetime import datetime, timezone
 
@@ -169,10 +168,15 @@ async def _scan_markets_inner(
         if signal is None:
             continue
 
+        # Skip if we already have an open position on this market (survives redeployments)
+        if position_mgr.has_position(signal.market_slug):
+            logger.info("SKIP already-positioned: %s", signal.market_slug)
+            continue
+
         balance = await client.get_balance()
         if balance < signal.amount_usd:
-            logger.info("Insufficient balance ($%.2f) for $%.2f trade — stopping", balance, signal.amount_usd)
-            break
+            logger.info("Insufficient balance ($%.2f) for $%.2f trade — skipping", balance, signal.amount_usd)
+            continue
 
         signals_fired += 1
         _traded_this_session.add(mid)
