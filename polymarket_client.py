@@ -66,19 +66,9 @@ class PolymarketClient:
 
     async def get_sports_markets(self, limit=200):
         us_markets = await self._get_us_sdk_markets(limit)
-        if us_markets:
-            allowed = [m for m in us_markets if self._is_allowed(m)]
-            logger.info("Polymarket.US SDK: %d markets, %d allowed", len(us_markets), len(allowed))
-            return allowed
-
-        # Fallback to Gamma API
-        data = await self._get(
-            f"{GAMMA_API}/markets",
-            params={"active": "true", "closed": "false", "limit": limit,
-                    "order": "volume24hr", "ascending": "false"},
-        )
-        markets = data if isinstance(data, list) else (data or {}).get("data", []) if data else []
-        return [m for m in markets if self._is_allowed(m)]
+        allowed = [m for m in us_markets if self._is_allowed(m)]
+        logger.info("Polymarket.US SDK: %d markets, %d allowed", len(us_markets), len(allowed))
+        return allowed
 
     async def _get_us_sdk_markets(self, limit=200) -> list[dict]:
         if not self._us_client:
@@ -118,15 +108,20 @@ class PolymarketClient:
 
         def _upcoming_in(markets):
             for m in markets:
-                gst = m.get("gameStartTime")
-                if not gst:
-                    continue
-                try:
-                    ts = datetime.fromisoformat(str(gst).replace("Z", "+00:00")).timestamp()
-                    if ts > now_ts:
-                        return True
-                except Exception:
-                    pass
+                # Check resolutionTime/closeTime first (set for upcoming markets),
+                # then gameStartTime (set for past games)
+                for field in ("resolutionTime", "closeTime", "gameStartTime"):
+                    raw = m.get(field)
+                    if not raw:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+                        if field == "gameStartTime":
+                            ts += 4 * 3600  # game + buffer
+                        if ts > now_ts:
+                            return True
+                    except Exception:
+                        pass
             return False
 
         async def _fetch_page(off: int) -> list:
@@ -135,7 +130,6 @@ class PolymarketClient:
                 None,
                 lambda: self._us_client.events.list({
                     "limit": 200,
-                    "active": True,
                     "offset": o,
                 }),
             )
