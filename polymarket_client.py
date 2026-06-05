@@ -327,7 +327,7 @@ class PolymarketClient:
                 return []
             return data if isinstance(data, list) else data.get("positions", [])
         except Exception as exc:
-            logger.debug("get_open_positions failed: %s", exc)
+            logger.warning("get_open_positions failed: %s", exc)
             return []
 
     # ---------------------------------------------------------------- #
@@ -400,29 +400,36 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, size_usd: float
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
-        intent   = "ORDER_INTENT_SELL_LONG" if side == "YES" else "ORDER_INTENT_SELL_SHORT"
         quantity = max(1, round(size_usd / price))
-        order = {
-            "marketSlug": market_slug,
-            "intent":     intent,
-            "type":       "ORDER_TYPE_LIMIT",
-            "price":      {"value": str(round(price, 4)), "currency": "USD"},
-            "quantity":   quantity,
-            "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
-        }
-        logger.info("Closing position: %s", order)
-        try:
-            resp = self._us_client.orders.create(order)
-            logger.info("Close response: %s", resp)
-            return resp
-        except AuthenticationError as exc:
-            logger.error("Auth error closing %s: %s", market_slug, exc)
-        except BadRequestError as exc:
-            logger.error("Bad request closing %s: %s", market_slug, exc)
-        except NotFoundError as exc:
-            logger.error("Market not found closing %s: %s", market_slug, exc)
-        except Exception as exc:
-            logger.error("Close order error for %s: %s", market_slug, exc)
+
+        # Try sell intent first (exit long/short), fall back to buying the opposite side
+        for intent in (
+            "ORDER_INTENT_SELL_LONG" if side == "YES" else "ORDER_INTENT_SELL_SHORT",
+            "ORDER_INTENT_BUY_SHORT" if side == "YES" else "ORDER_INTENT_BUY_LONG",
+        ):
+            order = {
+                "marketSlug": market_slug,
+                "intent":     intent,
+                "type":       "ORDER_TYPE_LIMIT",
+                "price":      {"value": str(round(price, 4)), "currency": "USD"},
+                "quantity":   quantity,
+                "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            }
+            logger.info("Closing position (intent=%s): %s", intent, order)
+            try:
+                resp = self._us_client.orders.create(order)
+                logger.info("Close response: %s", resp)
+                return resp
+            except BadRequestError as exc:
+                logger.warning("Close intent %s rejected for %s: %s — trying fallback", intent, market_slug, exc)
+            except AuthenticationError as exc:
+                logger.error("Auth error closing %s: %s", market_slug, exc)
+                return None
+            except NotFoundError as exc:
+                logger.error("Market not found closing %s: %s", market_slug, exc)
+                return None
+            except Exception as exc:
+                logger.error("Close order error for %s (intent=%s): %s", market_slug, intent, exc)
         return None
 
     # ---------------------------------------------------------------- #
