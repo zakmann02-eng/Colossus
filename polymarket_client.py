@@ -35,7 +35,7 @@ class PolymarketClient:
         self._us_client  = self._init_us_client()
         self._market_cache: dict = {}
         self._slug_map: dict[str, str] = {}
-        self._upcoming_offset: int = 0
+        self._upcoming_offset: int = 0  # cached after first scan finds upcoming games
         logger.info("PolymarketClient ready — key_id %s…", self._key_id[:8])
 
     def _init_us_client(self):
@@ -144,45 +144,54 @@ class PolymarketClient:
         try:
             all_markets: list[dict] = []
 
-            start_offset = max(0, self._upcoming_offset - 200)
-            if start_offset > 0:
-                logger.info("Jumping to cached offset %d to find upcoming games", start_offset)
+            # If cached, jump near that offset; otherwise coarse-scan in 500-event steps
+            # to find upcoming games across ANY sport without assuming NBA position
+            if self._upcoming_offset > 0:
+                start_offset = max(0, self._upcoming_offset - 200)
+                step = 200
+                logger.info("Jumping to cached offset %d", start_offset)
+            else:
+                start_offset = 0
+                step = 500  # coarse steps to cover 5000+ events quickly
 
             found = False
             offset = start_offset
-            max_offset = start_offset + 2000
 
-            while offset <= max_offset:
+            while offset <= start_offset + 5000:
                 page_events = await _fetch_page(offset)
                 if not page_events:
+                    if step == 500 and offset > 0:
+                        # Coarse scan ran out — no upcoming games exist
+                        break
                     logger.info("Pagination stopped at offset %d — no more events", offset)
                     break
                 page_markets = _build_markets(page_events)
-                all_markets.extend(page_markets)
-                if offset == start_offset and page_events:
-                    logger.info("SDK page offset=%d: %d events, sample keys: %s",
-                                offset, len(page_events), list(page_events[0].keys()))
-                else:
-                    logger.info("Paginated offset=%d: +%d markets (%d total)",
-                                offset, len(page_markets), len(all_markets))
+                logger.info("Scanned offset=%d: %d events", offset, len(page_events))
+
                 if _upcoming_in(page_markets):
                     logger.info("Found upcoming games at offset %d — caching", offset)
                     self._upcoming_offset = offset
                     found = True
+                    # Collect this page plus next 600 events to catch all live/upcoming markets
+                    all_markets.extend(page_markets)
                     for extra_off in range(offset + 200, offset + 800, 200):
                         extra_events = await _fetch_page(extra_off)
                         if not extra_events:
                             break
-                        all_markets.extend(_build_markets(extra_events))
+                        extra_markets = _build_markets(extra_events)
+                        all_markets.extend(extra_markets)
+                        if not _upcoming_in(extra_markets):
+                            break  # past the live window
                     break
-                offset += 200
+
+                offset += step
 
             if not found:
-                if start_offset > 0:
-                    logger.warning("No upcoming games at cached offset %d — resetting cache", start_offset)
+                if self._upcoming_offset > 0:
+                    logger.warning("Cached offset %d stale — resetting", self._upcoming_offset)
                     self._upcoming_offset = 0
                 else:
-                    logger.warning("Pagination exhausted to offset %d — no upcoming games found", offset)
+                    logger.warning("Coarse scan to offset %d found no upcoming games", offset)
 
             game_times = sorted(set(
                 m.get("gameStartTime", "")[:10]
@@ -199,6 +208,7 @@ class PolymarketClient:
         if not market.get("active", True) or market.get("closed", False):
             logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
+        # Skip completed/final games
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
             event_state = str(event_state_raw.get("status") or event_state_raw.get("state") or "").upper()
@@ -405,6 +415,7 @@ class PolymarketClient:
                     sides = json.loads(sides)
                 for s in sides:
                     if isinstance(s, dict):
+                        # look for YES side price
                         if str(s.get("side") or s.get("outcome") or "").upper() in ("YES", "LONG", "0"):
                             for k in ("price", "probability", "lastPrice", "bestAsk", "bestBid"):
                                 raw = s.get(k)
@@ -412,6 +423,7 @@ class PolymarketClient:
                                     p = float(raw)
                                     if 0 < p < 1:
                                         return p
+                # fallback: just grab first numeric price in range
                 for s in sides:
                     if isinstance(s, dict):
                         for k in ("price", "probability", "lastPrice", "bestAsk", "bestBid"):
@@ -491,6 +503,7 @@ class PolymarketClient:
     def seconds_to_resolution(self, market):
         raw = market.get("resolutionTime") or market.get("closeTime")
         if not raw:
+            # Fall back to gameStartTime + 4h (covers in-progress games; past games return negative)
             raw = market.get("gameStartTime")
             if not raw:
                 return None
