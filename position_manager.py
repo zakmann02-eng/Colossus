@@ -137,13 +137,35 @@ class PositionManager:
             (sl_pct or self._default_sl) * 100,
         )
 
+    async def _get_price_for_entry(self, token_id: str, entry: "_Entry") -> float | None:
+        """Get current price for a position.
+
+        Synced positions use synthetic slug-based token IDs that the CLOB doesn't
+        know about. For those, look up the current price from the live portfolio.
+        """
+        if token_id.startswith("sync_"):
+            try:
+                positions = await self._client.get_open_positions()
+                for p in (positions or []):
+                    if not isinstance(p, dict):
+                        continue
+                    slug = p.get("marketSlug") or p.get("slug") or ""
+                    if slug == entry.market_slug:
+                        raw = p.get("currentPrice") or p.get("price") or p.get("lastPrice")
+                        if raw:
+                            return float(raw)
+            except Exception as exc:
+                logger.debug("Portfolio price lookup failed for %s: %s", entry.market_slug, exc)
+            return None
+        return await self._client.get_current_price(token_id)
+
     async def check_positions(self) -> None:
         if not self._entries:
             logger.debug("No tracked positions — skipping TP/SL check")
             return
         logger.info("Checking %d tracked position(s) for TP/SL…", len(self._entries))
         for token_id, entry in list(self._entries.items()):
-            current_price = await self._client.get_current_price(token_id)
+            current_price = await self._get_price_for_entry(token_id, entry)
             if current_price is None:
                 logger.warning(
                     "No price for %s (token=%s…) — skipping this cycle",
@@ -168,7 +190,7 @@ class PositionManager:
 
         # Close positions tracked in _entries (survive crash-restarts)
         for token_id, entry in list(self._entries.items()):
-            current_price = await self._client.get_current_price(token_id) or entry.price
+            current_price = await self._get_price_for_entry(token_id, entry) or entry.price
             await self._close(token_id, entry, current_price, "Manual /sellall")
             count += 1
 
@@ -215,7 +237,7 @@ class PositionManager:
             return 0
         count = 0
         for token_id, entry in list(self._entries.items()):
-            current_price = await self._client.get_current_price(token_id) or entry.price
+            current_price = await self._get_price_for_entry(token_id, entry) or entry.price
             half_usd = round(entry.amount_usd / 2, 2)
             try:
                 await self._client.close_position(
