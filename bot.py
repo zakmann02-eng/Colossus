@@ -245,15 +245,23 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not isinstance(p, dict):
             lines.append(f"• (non-dict entry: {str(p)[:60]})")
             continue
-        slug = (p.get("marketSlug") or p.get("slug") or p.get("market") or p.get("name") or "unknown")[:25]
-        size = p.get("size") or p.get("quantity") or p.get("shares") or "?"
-        avg  = p.get("avgPrice") or p.get("price") or p.get("avgCost") or "?"
-        curr = p.get("currentPrice") or p.get("marketPrice") or p.get("lastPrice") or "?"
-        pnl  = p.get("percentPnl") or p.get("pnlPercent") or p.get("unrealizedPnlPercent") or "?"
-        lines.append(f"• `{slug}`\n  size={size} avg={avg} now={curr} pnl={pnl}%")
-    # If every position had no recognisable fields, show raw keys for diagnosis
-    if len(lines) == 1 and positions and isinstance(positions[0], dict):
-        lines.append(f"_(fields: {', '.join(positions[0].keys())})_")
+        # Polymarket.US nests slug inside marketMetadata
+        meta = p.get("marketMetadata") or {}
+        slug = (meta.get("slug") or p.get("marketSlug") or p.get("slug") or "unknown")[:30]
+        outcome = meta.get("outcome") or ""
+        net = p.get("netPosition") or p.get("netPositionDecimal") or "?"
+        # avgPx and cashValue are {value, currency} dicts
+        avg_px = p.get("avgPx") or p.get("avgPrice") or {}
+        avg  = avg_px.get("value") if isinstance(avg_px, dict) else avg_px or "?"
+        cash = p.get("cashValue") or {}
+        curr_val = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
+        net_abs = abs(float(net)) if net != "?" else 0
+        curr = f"{curr_val/net_abs:.3f}" if net_abs > 0 and curr_val > 0 else "?"
+        cost = p.get("cost") or {}
+        cost_val = float(cost.get("value") if isinstance(cost, dict) else cost or 0)
+        pnl_usd = curr_val - cost_val if curr_val and cost_val else None
+        pnl_str = f"{'+' if pnl_usd >= 0 else ''}${pnl_usd:.2f}" if pnl_usd is not None else "?"
+        lines.append(f"• `{slug}`\n  {outcome} · qty={net} avg={avg} now={curr} pnl={pnl_str}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
