@@ -377,7 +377,8 @@ class PolymarketClient:
         try:
             resp = self._us_client.orders.create(order)
             logger.info("Order response: %s", resp)
-            return resp
+            # SDK returns None on some success responses (201/204) — treat as filled
+            return resp if resp is not None else {"status": "open", "_sdk_returned_none": True}
         except AuthenticationError as exc:
             logger.error("Auth error: %s", exc)
         except BadRequestError as exc:
