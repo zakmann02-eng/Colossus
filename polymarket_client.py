@@ -1,5 +1,3 @@
-$ cat /home/user/Colossus/polymarket_client.py
-
 """
 Polymarket API client — market data + trade execution.
 Uses polymarket-us SDK for authenticated trading on Polymarket.US.
