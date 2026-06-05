@@ -13,9 +13,9 @@ Any 1 trigger fires a trade:
   T4  Resolves within 7 days (always fires for near-term markets)
 
 Position sizing by triggers fired:
-  1 trigger  → LOW  → $0.10–$0.50  · TP 8%  · SL 8%
-  2 triggers → MED  → $0.50–$1.25  · TP 12% · SL 10%
-  3+ triggers→ HIGH → $1.25–$2.00  · TP 15% · SL 10%
+  1 trigger  → LOW  → $0.10–$0.35  · TP 8%  · SL 8%
+  2 triggers → MED  → $0.35–$0.65  · TP 12% · SL 10%
+  3+ triggers→ HIGH → $0.65–$1.00  · TP 15% · SL 10%
 """
 
 from __future__ import annotations
@@ -42,10 +42,11 @@ T3_MULT = 1.5
 T4_SECS = 7 * 86_400
 
 _TIERS = {
-    1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, ...},
-    2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, ...},
-    3: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, ...},
+    1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, "tp": 0.08, "sl": 0.08},
+    2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.12, "sl": 0.10},
+    3: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.15, "sl": 0.10},
 }
+
 
 @dataclass
 class TradeSignal:
