@@ -111,7 +111,13 @@ async def _scan_markets_inner(
     logger.info("Scanning markets…")
     balance = await client.get_balance()
     if balance < MIN_TRADE_USD:
-        logger.info("Insufficient balance ($%.2f) — skipping trades", balance)
+        logger.warning("Insufficient balance ($%.2f) — halting trades", balance)
+        await _send(app, (
+            f"⛔ *Colossus halted — insufficient funds*\n"
+            f"Balance: ${balance:.2f} (minimum: ${MIN_TRADE_USD:.2f})\n"
+            f"Top up your account and use /resume to restart scanning."
+        ))
+        os.environ["PAUSED"] = "true"
         return
 
     markets = await client.get_sports_markets(limit=200)
