@@ -117,10 +117,21 @@ async def _scan_markets_inner(
     markets = await client.get_sports_markets(limit=200)
     logger.info("Found %d eligible markets", len(markets))
 
-    # Sort by 24h volume descending and cap at 300 to keep scans under 60s
+    # Sort by volume but cap at 20 markets per event so one high-volume
+    # game (e.g. NBA Finals) can't crowd out all other sports
     markets.sort(key=lambda m: float(m.get("volume24hr") or m.get("volume24Hour") or 0), reverse=True)
-    markets = markets[:300]
-    logger.info("Evaluating top %d markets by volume", len(markets))
+    seen_events: dict[str, int] = {}
+    capped: list[dict] = []
+    for m in markets:
+        event_key = m.get("eventSlug") or m.get("slug") or ""
+        count = seen_events.get(event_key, 0)
+        if count < 20:
+            capped.append(m)
+            seen_events[event_key] = count + 1
+        if len(capped) >= 300:
+            break
+    markets = capped
+    logger.info("Evaluating %d markets across %d events", len(markets), len(seen_events))
 
     signals_fired = 0
 
