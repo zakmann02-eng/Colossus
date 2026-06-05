@@ -89,16 +89,17 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
 
     token_id = client.resolve_token_id(market, "YES")
     if not token_id:
-        logger.debug("SKIP no-token: %s", question[:60])
+        logger.info("SKIP no-token: %s", question[:60])
         return None
 
     secs = client.seconds_to_resolution(market)
     if secs is not None and (secs <= 0 or secs > MAX_DAYS_OUT):
-        logger.debug("SKIP time(%.1fd): %s", secs / 86400, question[:60])
+        logger.info("SKIP time(%.1fd): %s", secs / 86400, question[:60])
         return None
 
     vol_24h = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
     if vol_24h > 0 and vol_24h < MIN_VOL_24H:
+        logger.info("SKIP vol(%.0f): %s", vol_24h, question[:60])
         return None
 
     price = await client.get_market_price(market, token_id)
