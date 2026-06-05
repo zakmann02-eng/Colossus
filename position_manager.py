@@ -179,10 +179,13 @@ class PositionManager:
                 entry.price, current_price, pnl * 100,
                 entry.tp * 100, entry.sl * 100,
             )
-            if pnl >= entry.tp:
-                await self._close(token_id, entry, current_price, f"TP +{pnl:.1%}")
-            elif pnl <= -entry.sl:
-                await self._close(token_id, entry, current_price, f"SL {pnl:.1%}")
+            try:
+                if pnl >= entry.tp:
+                    await self._close(token_id, entry, current_price, f"TP +{pnl:.1%}")
+                elif pnl <= -entry.sl:
+                    await self._close(token_id, entry, current_price, f"SL {pnl:.1%}")
+            except Exception as exc:
+                logger.error("Unexpected error closing %s: %s", entry.market_slug, exc)
 
     async def sell_all(self) -> int:
         """Close every tracked position immediately. Returns number closed."""
@@ -272,9 +275,15 @@ class PositionManager:
     async def _close(
         self, token_id: str, entry: _Entry, current_price: float, reason: str
     ) -> None:
-        await self._client.close_position(
-            entry.market_slug, entry.side, current_price, entry.amount_usd
-        )
+        try:
+            await self._client.close_position(
+                entry.market_slug, entry.side, current_price, entry.amount_usd
+            )
+        except Exception as exc:
+            logger.error(
+                "close_position API call failed for %s: %s — removing from tracker anyway",
+                entry.market_slug, exc,
+            )
         self._entries.pop(token_id, None)
         self._save()
         pnl = (current_price - entry.price) / entry.price if entry.price else 0
