@@ -139,55 +139,68 @@ class PositionManager:
             (sl_pct or self._default_sl) * 100,
         )
 
+    def has_position(self, market_slug: str) -> bool:
+        """Return True if we already track an open position on this market slug."""
+        return any(e.market_slug == market_slug for e in self._entries.values())
+
     async def _get_price_for_entry(self, token_id: str, entry: "_Entry") -> float | None:
         """Get current price for a position.
 
-        Synced positions use synthetic slug-based token IDs that the CLOB doesn't
-        know about. For those, look up the current price from the live portfolio.
+        For proper 32-char hex CLOB token IDs try CLOB first, then fall back to
+        the portfolio API. For all Polymarket.US slug-based tokens (both sync_ and
+        newly-recorded entries) go straight to the portfolio API.
         """
-        if token_id.startswith("sync_"):
-            try:
-                positions = await self._client.get_open_positions()
-                for p in (positions or []):
-                    if not isinstance(p, dict):
-                        continue
-                    slug = p.get("marketSlug") or p.get("slug") or ""
-                    if slug != entry.market_slug:
-                        continue
-                    # Try explicit current-price fields
-                    for field in ("currentPrice", "marketPrice", "lastPrice",
-                                  "lastTradePrice", "markPrice"):
-                        raw = p.get(field)
-                        if raw is not None:
-                            try:
-                                val = float(raw)
-                                if 0 < val <= 1:
-                                    return val
-                            except (TypeError, ValueError):
-                                pass
-                    # Compute from current value ÷ share count
-                    curr_val = float(p.get("currentValue") or p.get("cashValue") or p.get("value") or 0)
-                    size = float(p.get("size") or p.get("quantity") or p.get("shares") or 0)
-                    if curr_val > 0 and size > 0:
-                        return curr_val / size
-                    # Back-calculate from percentPnl if available
-                    raw_pnl = p.get("percentPnl") or p.get("unrealizedPnlPercent") or p.get("pnlPercent")
-                    if raw_pnl is not None and entry.price > 0:
+        tid = str(token_id)
+        is_clob_token = (
+            not tid.startswith("sync_")
+            and len(tid) >= 32
+            and tid.replace("-", "").isalnum()
+        )
+        if is_clob_token:
+            price = await self._client.get_current_price(token_id)
+            if price is not None:
+                return price
+
+        # Portfolio API fallback — covers sync_ tokens and all Polymarket.US slugs
+        try:
+            positions = await self._client.get_open_positions()
+            for p in (positions or []):
+                if not isinstance(p, dict):
+                    continue
+                slug = p.get("marketSlug") or p.get("slug") or ""
+                if slug != entry.market_slug:
+                    continue
+                # Try explicit current-price fields
+                for field in ("currentPrice", "marketPrice", "lastPrice",
+                              "lastTradePrice", "markPrice"):
+                    raw = p.get(field)
+                    if raw is not None:
                         try:
-                            pnl = float(raw_pnl)
-                            # API may return e.g. -51.0 (percent) or -0.51 (fraction)
-                            if abs(pnl) > 1:
-                                pnl /= 100
-                            return entry.price * (1 + pnl)
+                            val = float(raw)
+                            if 0 < val <= 1:
+                                return val
                         except (TypeError, ValueError):
                             pass
-                    # Log full position so we can see actual field names in Railway logs
-                    logger.info("Cannot resolve current price for %s — raw position: %s",
-                                entry.market_slug, p)
-            except Exception as exc:
-                logger.warning("Portfolio price lookup failed for %s: %s", entry.market_slug, exc)
-            return None
-        return await self._client.get_current_price(token_id)
+                # Compute from current value ÷ share count
+                curr_val = float(p.get("currentValue") or p.get("cashValue") or p.get("value") or 0)
+                size = float(p.get("size") or p.get("quantity") or p.get("shares") or 0)
+                if curr_val > 0 and size > 0:
+                    return curr_val / size
+                # Back-calculate from percentPnl if available
+                raw_pnl = p.get("percentPnl") or p.get("unrealizedPnlPercent") or p.get("pnlPercent")
+                if raw_pnl is not None and entry.price > 0:
+                    try:
+                        pnl = float(raw_pnl)
+                        if abs(pnl) > 1:
+                            pnl /= 100
+                        return entry.price * (1 + pnl)
+                    except (TypeError, ValueError):
+                        pass
+                logger.info("Cannot resolve current price for %s — raw position: %s",
+                            entry.market_slug, p)
+        except Exception as exc:
+            logger.warning("Portfolio price lookup failed for %s: %s", entry.market_slug, exc)
+        return None
 
     async def check_positions(self) -> None:
         if not self._entries:
