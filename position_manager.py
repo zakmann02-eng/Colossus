@@ -94,22 +94,25 @@ class PositionManager:
 
     async def check_positions(self) -> None:
         if not self._entries:
+            logger.info("No tracked positions — skipping TP/SL check")
             return
-        positions = await self._client.get_open_positions()
-        live = {
-            (p.get("asset") or p.get("tokenId") or p.get("marketSlug") or ""): p
-            for p in positions
-        }
+        logger.info("Checking %d tracked position(s) for TP/SL…", len(self._entries))
         for token_id, entry in list(self._entries.items()):
-            pos = live.get(token_id) or live.get(entry.market_slug)
-            if not pos:
-                self._entries.pop(token_id, None)
-                self._save()
+            # Fetch price directly from CLOB using stored token_id — no portfolio key-matching
+            current_price = await self._client.get_current_price(token_id)
+            if current_price is None:
+                logger.warning(
+                    "No price for %s (token=%s…) — skipping this cycle",
+                    entry.market_slug, token_id[:12],
+                )
                 continue
-            current_price = float(
-                pos.get("currentPrice") or pos.get("price") or entry.price
+            pnl = (current_price - entry.price) / entry.price if entry.price else 0
+            logger.info(
+                "Position: %s %s  entry=%.3f  now=%.3f  pnl=%+.1f%%  (TP=%.0f%% SL=%.0f%%)",
+                entry.market_slug, entry.side,
+                entry.price, current_price, pnl * 100,
+                entry.tp * 100, entry.sl * 100,
             )
-            pnl = (current_price - entry.price) / entry.price
             if pnl >= entry.tp:
                 await self._close(token_id, entry, current_price, f"TP +{pnl:.1%}")
             elif pnl <= -entry.sl:
@@ -119,16 +122,9 @@ class PositionManager:
         """Close every tracked position immediately. Returns number closed."""
         if not self._entries:
             return 0
-        positions = await self._client.get_open_positions()
-        price_map = {
-            (p.get("asset") or p.get("tokenId") or p.get("marketSlug") or ""): float(
-                p.get("currentPrice") or p.get("price") or 0
-            )
-            for p in positions
-        }
         count = 0
         for token_id, entry in list(self._entries.items()):
-            current_price = price_map.get(token_id) or price_map.get(entry.market_slug) or entry.price
+            current_price = await self._client.get_current_price(token_id) or entry.price
             await self._close(token_id, entry, current_price, "Manual /sellall")
             count += 1
         return count
@@ -137,16 +133,9 @@ class PositionManager:
         """Sell half of each tracked position. Returns number of half-sells executed."""
         if not self._entries:
             return 0
-        positions = await self._client.get_open_positions()
-        price_map = {
-            (p.get("asset") or p.get("tokenId") or p.get("marketSlug") or ""): float(
-                p.get("currentPrice") or p.get("price") or 0
-            )
-            for p in positions
-        }
         count = 0
         for token_id, entry in list(self._entries.items()):
-            current_price = price_map.get(token_id) or price_map.get(entry.market_slug) or entry.price
+            current_price = await self._client.get_current_price(token_id) or entry.price
             half_usd = round(entry.amount_usd / 2, 2)
             try:
                 await self._client.close_position(
