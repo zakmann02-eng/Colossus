@@ -2,7 +2,7 @@
 Colossus — autonomous Polymarket sports trading bot.
 
 Uses polymarket-us SDK for authenticated trading on Polymarket.US.
-Scans markets every 60s, fires on 1+ triggers, places up to $1 orders,
+Scans markets every 60s, fires on 1+ triggers, places up to $2 orders,
 monitors positions for TP/SL every 5 min. Telegram alerts throughout.
 """
 
@@ -93,6 +93,17 @@ async def scan_markets(
     app: Application,
     position_mgr: PositionManager,
 ) -> None:
+    try:
+        await _scan_markets_inner(client, app, position_mgr)
+    except Exception as exc:
+        logger.error("scan_markets crashed: %s", exc, exc_info=True)
+
+
+async def _scan_markets_inner(
+    client: PolymarketClient,
+    app: Application,
+    position_mgr: PositionManager,
+) -> None:
     if os.getenv("PAUSED", "false").lower() == "true":
         logger.info("Bot paused — skipping scan")
         return
@@ -156,6 +167,7 @@ async def scan_markets(
             position_mgr.record_entry(
                 signal.token_id, signal.market_slug, signal.side,
                 signal.price_now, signal.tp_pct, signal.sl_pct,
+                amount_usd=signal.amount_usd,
             )
 
     if signals_fired == 0:
