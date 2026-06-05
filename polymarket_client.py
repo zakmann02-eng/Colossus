@@ -1,3 +1,5 @@
+$ cat /home/user/Colossus/polymarket_client.py
+
 """
 Polymarket API client — market data + trade execution.
 Uses polymarket-us SDK for authenticated trading on Polymarket.US.
@@ -331,6 +333,8 @@ class PolymarketClient:
                 val = data.get(key)
                 if isinstance(val, list):
                     return val
+                if isinstance(val, dict):
+                    return list(val.values())
             logger.warning("get_open_positions: unrecognised response shape — keys: %s", list(data.keys()) if isinstance(data, dict) else type(data))
             return []
         except Exception as exc:
