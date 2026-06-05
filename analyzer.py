@@ -134,12 +134,14 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         logger.debug("SKIP no-triggers: %s", question[:60])
         return None
 
-    # Reject markets with no active buyers/sellers on the CLOB
-    if not await client.has_liquidity(token_id, min_usd=0.10):
+    side = _decide_side(price)
+    trade_token = token_id if side == "YES" else (client.resolve_token_id(market, "NO") or token_id)
+
+    # Reject markets with no active buyers/sellers — unfillable order = lost capital
+    if not await client.has_liquidity(trade_token, min_usd=0.10):
         logger.debug("SKIP no-liquidity: %s", question[:60])
         return None
 
-    side               = _decide_side(price)
     amount, tp, sl, label = _size_position(len(triggers))
     score              = min(100, 25 + len(triggers) * 25)
 
@@ -148,7 +150,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         market_slug = market_slug,
         question    = question,
         side        = side,
-        token_id    = token_id if side == "YES" else (client.resolve_token_id(market, "NO") or token_id),
+        token_id    = trade_token,
         price_now   = price,
         triggers    = triggers,
         score       = score,
