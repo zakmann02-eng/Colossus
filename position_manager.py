@@ -13,8 +13,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_PERSIST_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
-_RESERVE_FILE = os.path.join(os.path.dirname(__file__), "reserve.json")
+# Use /data volume if available (Railway persistent volume), else fall back to app dir
+_DATA_DIR     = "/data" if os.path.isdir("/data") else os.path.dirname(__file__)
+_PERSIST_FILE = os.path.join(_DATA_DIR, "positions.json")
+_RESERVE_FILE = os.path.join(_DATA_DIR, "reserve.json")
 
 PROFIT_RESERVE_PCT = 0.30  # 30% of each TP profit locked away
 
@@ -174,8 +176,9 @@ class PositionManager:
             price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
             cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
             size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
-            if price <= 0 or size_usd <= 0:
+            if price <= 0:
                 continue
+            # Register even near-zero value positions so /sellall can close them
             token_id = f"sync_{slug}_{side}"
             self._entries[token_id] = _Entry(
                 market_slug = slug,
