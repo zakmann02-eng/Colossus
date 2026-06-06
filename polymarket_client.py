@@ -541,9 +541,14 @@ class PolymarketClient:
         except Exception:
             return None
 
-    def market_url(self, market):
-        slug = market.get("slug") or market.get("marketSlug") or ""
-        if slug:
-            return f"https://polymarket.us/event/{slug}"
-        mid = market.get("id") or ""
-        return f"https://polymarket.us/event/{mid}" if mid else "https://polymarket.us"
+       def get_market_slug(self, market: dict) -> str:
+        # Prefer the market-level slug (e.g. 'aec-lol-dk-bro-2026-06-06') over the
+        # event slug ('lol-dk-bro-2026-06-06') so it matches the portfolio API exactly.
+        candidates = [
+            market.get("marketSlug"),
+            market.get("slug"),
+            market.get("eventSlug"),
+        ]
+        # Pick the longest non-empty candidate — market slugs are longer than event slugs
+        slugs = [s for s in candidates if s]
+        return max(slugs, key=len) if slugs else ""
