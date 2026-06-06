@@ -23,7 +23,9 @@ _BLOCKED = {
     "trump", "harris", "biden", "democrat", "republican",
     "war", "conflict", "invasion", "missile", "nato",
     "fed rate", "interest rate", "inflation", "gdp",
+    "cpi", "consumer price", "pce", "unemployment", "payroll", "fomc",
     "oscar", "grammy", "emmy", "celebrity", "reality tv",
+    "crypto", "bitcoin", "ethereum", "btc", "eth",
 }
 
 
@@ -346,6 +348,20 @@ class PolymarketClient:
     # Order placement                                                   #
     # ---------------------------------------------------------------- #
 
+    async def cancel_order(self, order_id: str) -> bool:
+        if not self._us_client or not order_id:
+            return False
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None, lambda: self._us_client.orders.cancel(order_id)
+            )
+            logger.info("Cancelled pending order %s", order_id)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to cancel order %s: %s", order_id, exc)
+            return False
+
     async def place_market_order(
         self, market_slug: str, side: str, price: float, amount_usd: float
     ) -> dict | None:
@@ -383,7 +399,7 @@ class PolymarketClient:
             "type":       "ORDER_TYPE_LIMIT",
             "price":      {"value": str(order_price), "currency": "USD"},
             "quantity":   quantity,
-            "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            "tif":        "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
         }
         logger.info("Placing order: %s", order)
         try:
