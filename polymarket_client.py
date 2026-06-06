@@ -35,7 +35,7 @@ class PolymarketClient:
         self._key_id     = key_id.strip()
         self._secret_key = secret_key.strip()
         self._us_client  = self._init_us_client()
-        self._market_cache: dict = {}
+self._last_markets: list = []   # updated every scan; used by get_token_id_for_slug
         self._slug_map: dict[str, str] = {}
         self._upcoming_offset: int = 0
         logger.info("PolymarketClient ready — key_id %s…", self._key_id[:8])
@@ -66,15 +66,22 @@ class PolymarketClient:
     # Market scanning                                                    #
     # ---------------------------------------------------------------- #
 
-    async def get_sports_markets(self, limit=200):
+        async def get_sports_markets(self, limit=200):
         us_markets = await self._get_us_sdk_markets(limit)
+        if us_markets:
+            self._last_markets = us_markets  # cache for slug→token_id lookups
         allowed = [m for m in us_markets if self._is_allowed(m)]
         logger.info("Polymarket.US SDK: %d markets, %d allowed", len(us_markets), len(allowed))
         return allowed
 
-    async def _get_us_sdk_markets(self, limit=200) -> list[dict]:
-        if not self._us_client:
-            return []
+    def get_token_id_for_slug(self, slug: str, side: str = "YES") -> str | None:
+        """Return the CLOB token_id for a slug from the cached market list."""
+        for m in self._last_markets:
+            if self.get_market_slug(m) == slug:
+                tid = self.resolve_token_id(m, side)
+                if tid:
+                    return tid
+        return None
         loop = asyncio.get_event_loop()
 
         def _build_markets(events):
