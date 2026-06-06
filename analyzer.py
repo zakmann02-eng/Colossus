@@ -35,10 +35,10 @@ logger = logging.getLogger(__name__)
 
 # Intra-game period markets — quarter/half totals & spreads, rarely profitable
 _PERIOD_RE = re.compile(
-    r'\b[1-4]\s*[Qq]\b'
-    r'|\b[Qq]\s*[1-4]\b'
-    r'|\b[1-4]\s*[Hh]\b'
-    r'|\b[Hh]\s*[1-4]\b'
+    r'\b[1-4]\s*[Qq]\b'                          # 1Q 2Q 3Q 4Q
+    r'|\b[Qq]\s*[1-4]\b'                          # Q1 Q2 Q3 Q4
+    r'|\b[1-4]\s*[Hh]\b'                          # 1H 2H
+    r'|\b[Hh]\s*[1-4]\b'                          # H1 H2
     r'|\b(1st|2nd|3rd|4th)\s*(quarter|qtr|half|period)\b'
     r'|\b(first|second|third|fourth)\s*(quarter|half|period)\b'
     r'|\bquarter\b|\bhalftime\b|\bhalf[\s\-]time\b'
@@ -48,30 +48,30 @@ _PERIOD_RE = re.compile(
 
 # Player prop markets — individual stat lines have no team-level edge
 _PROP_RE = re.compile(
-    r'\brebound[s]?\b'
-    r'|\bassist[s]?\b'
-    r'|\bpra\b'
-    r'|\b(rushing|passing|receiving)\s+yard[s]?\b'
-    r'|\breception[s]?\b'
-    r'|\bstrikeout[s]?\b|\bk[s]?\s+prop\b'
-    r'|\bhome[\s\-]?run[s]?\b'
-    r'|\brbi[s]?\b'
-    r'|\bsave[s]?\s+prop\b'
-    r'|\b\d+\+\s*(pts?|points?|reb|rebs?|ast|asts?|yds?)\b'
-    r'|\bover\s+\d+\.5\s+(pts?|points?|reb|rebs?|ast|asts?|yds?)\b'
+    r'\brebound[s]?\b'                            # basketball rebounds
+    r'|\bassist[s]?\b'                            # basketball/hockey assists
+    r'|\bpra\b'                                   # points+rebounds+assists combo
+    r'|\b(rushing|passing|receiving)\s+yard[s]?\b'  # NFL player yards
+    r'|\breception[s]?\b'                         # NFL targets
+    r'|\bstrikeout[s]?\b|\bk[s]?\s+prop\b'       # baseball Ks
+    r'|\bhome[\s\-]?run[s]?\b'                    # baseball HR
+    r'|\brbi[s]?\b'                               # baseball RBIs
+    r'|\bsave[s]?\s+prop\b'                       # hockey saves
+    r'|\b\d+\+\s*(pts?|points?|reb|rebs?|ast|asts?|yds?)\b'  # "25+ pts" format
+    r'|\bover\s+\d+\.5\s+(pts?|points?|reb|rebs?|ast|asts?|yds?)\b'  # "over 24.5 pts"
     r'|\bplayer\s+prop\b',
     re.IGNORECASE,
 )
 
 MIN_PRICE    = 0.25
 MAX_PRICE    = 0.75
-MIN_VOL_24H  = 100.0
+MIN_VOL_24H  = 500.0   # raised from $100 — thin markets have wide spreads and poor exits
 MAX_DAYS_OUT = 7 * 86_400
 
 T1_LOW  = 0.40
 T1_HIGH = 0.60
 T3_MULT = 1.5
-T4_SECS = 2 * 86_400
+T4_SECS = 2 * 86_400   # tightened: 48h (was 7 days — always fired, added no signal)
 
 _TIERS = {
     1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, "tp": 0.15, "sl": 0.05},
@@ -177,21 +177,27 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     triggers: list[str] = []
     now = time.time()
 
+    # T1: price near 50/50 — genuinely contested market
     if T1_LOW <= price <= T1_HIGH:
         triggers.append(f"T1:prob={price:.2f}")
 
+    # T2: game is currently live (started but not yet resolved)
+    # Replaces the old CLOB-based 15-min price movement check which never
+    # fired for Polymarket.US slug-based tokens.
     game_start_raw = market.get("gameStartTime") or market.get("startTime") or market.get("startDate")
     if game_start_raw:
         start_ts = _parse_ts(game_start_raw)
         if 0 < start_ts < now:
             triggers.append("T2:live")
 
+    # T3: 24h volume is unusually high relative to historical daily average
     vol_all   = _safe_float(market.get("volume") or market.get("volumeNum"))
     days_est  = max(1.0, _safe_float(market.get("daysAgo"), 7.0))
     daily_avg = vol_all / days_est if vol_all else 0
     if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
 
+    # T4: resolves within 48h — imminent outcome, tighter edge window
     if secs is not None and 0 < secs <= T4_SECS:
         triggers.append(f"T4:hrs={secs/3600:.0f}h")
 
