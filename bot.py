@@ -121,6 +121,8 @@ async def _scan_markets_inner(
             return
 
     logger.info("Scanning markets…")
+    # Re-sync open positions before scanning so has_position() blocks re-trades after redeployments
+    await position_mgr.sync_from_exchange()
     balance = await client.get_balance()
     available = max(0.0, balance - position_mgr.reserve_usd)
     if available < MIN_TRADE_USD:
@@ -194,21 +196,8 @@ async def _scan_markets_inner(
 
         logger.info("Order raw response: %s", resp)
         order_status = (resp or {}).get("status", "") if isinstance(resp, dict) else ""
-        executions = (resp or {}).get("executions") if isinstance(resp, dict) else None
-        # Only record a position if the order actually filled (non-empty executions list).
-        # executions:[] means the IOC order found no counterparty and was cancelled.
-        filled = (
-            order_status in ("matched", "filled", "MATCHED", "FILLED")
-            or (isinstance(executions, list) and len(executions) > 0)
-            or (resp and not isinstance(resp, dict))
-        )
-        order_id = (resp or {}).get("id", "") if isinstance(resp, dict) else ""
-        if not filled and order_id:
-            status = f"⏳ no fill (id={order_id[:8]}…) — no counterparty at this price"
-        elif filled:
-            status = "✅ filled"
-        else:
-            status = f"⚠️ not placed ({order_status or 'no response'})"
+        filled = order_status in ("matched", "filled", "MATCHED", "FILLED", "open", "OPEN") or (resp and not isinstance(resp, dict))
+        status = "✅ filled" if filled else f"⚠️ not filled ({order_status or 'no response'})"
 
         msg = (
             f"🏆 *Trade Opened*\n"
