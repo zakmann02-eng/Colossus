@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -13,6 +14,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PERSIST_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
+_RESERVE_FILE = os.path.join(os.path.dirname(__file__), "reserve.json")
+
+PROFIT_RESERVE_PCT = 0.30  # 30% of each TP profit locked away
 
 
 @dataclass
@@ -40,7 +44,21 @@ class PositionManager:
         self._default_tp = default_tp
         self._default_sl = default_sl
         self._entries: dict[str, _Entry] = {}
+
+        # Profit reserve — persisted across restarts
+        self._reserve_usd: float = 0.0
+
+        # Daily stats — reset at midnight UTC by send_daily_report()
+        self._day_opened:   int   = 0
+        self._day_tp:       int   = 0
+        self._day_sl:       int   = 0
+        self._day_pnl:      float = 0.0
+        self._day_reserved: float = 0.0
+
         self._load()
+        self._load_reserve()
+
+    # ── Persistence ───────────────────────────────────────────────────
 
     def _load(self) -> None:
         try:
@@ -61,6 +79,68 @@ class PositionManager:
                 json.dump({k: asdict(v) for k, v in self._entries.items()}, f)
         except Exception as exc:
             logger.warning("Failed to save positions.json: %s", exc)
+
+    def _load_reserve(self) -> None:
+        try:
+            with open(_RESERVE_FILE) as f:
+                data = json.load(f)
+            self._reserve_usd = float(data.get("reserve_usd", 0.0))
+            logger.info("Loaded profit reserve: $%.2f", self._reserve_usd)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logger.warning("Failed to load reserve.json: %s", exc)
+
+    def _save_reserve(self) -> None:
+        try:
+            with open(_RESERVE_FILE, "w") as f:
+                json.dump({"reserve_usd": round(self._reserve_usd, 4)}, f)
+        except Exception as exc:
+            logger.warning("Failed to save reserve.json: %s", exc)
+
+    # ── Public API ────────────────────────────────────────────────────
+
+    @property
+    def reserve_usd(self) -> float:
+        return self._reserve_usd
+
+    def record_trade_opened(self) -> None:
+        self._day_opened += 1
+
+    async def send_daily_report(self) -> None:
+        """Send end-of-day P&L report to Telegram and reset daily counters."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        total_closed = self._day_tp + self._day_sl
+        win_rate = f"{self._day_tp / total_closed:.0%}" if total_closed > 0 else "N/A"
+        pnl_sign = "+" if self._day_pnl >= 0 else ""
+        balance = await self._client.get_balance()
+
+        msg = (
+            f"📊 *Colossus Daily Report — {now}*\n\n"
+            f"Trades opened:  {self._day_opened}\n"
+            f"Closed TP ✅:   {self._day_tp}\n"
+            f"Closed SL 🔴:   {self._day_sl}\n"
+            f"Win rate:        {win_rate}\n\n"
+            f"Day P&L:         {pnl_sign}${self._day_pnl:.2f}\n"
+            f"Reserved today:  ${self._day_reserved:.2f}\n"
+            f"Total reserve:   ${self._reserve_usd:.2f}\n\n"
+            f"Account balance: ${balance:.2f}\n"
+            f"Available:       ${max(0.0, balance - self._reserve_usd):.2f}"
+        )
+        try:
+            await self._app.bot.send_message(
+                chat_id=self._chat_id, text=msg, parse_mode="Markdown",
+            )
+        except Exception as exc:
+            logger.error("Failed to send daily report: %s", exc)
+
+        # Reset daily counters
+        self._day_opened   = 0
+        self._day_tp       = 0
+        self._day_sl       = 0
+        self._day_pnl      = 0.0
+        self._day_reserved = 0.0
+        logger.info("Daily report sent and counters reset")
 
     async def sync_from_exchange(self) -> None:
         try:
@@ -131,6 +211,7 @@ class PositionManager:
             amount_usd  = amount_usd,
         )
         self._save()
+        self._day_opened += 1
         logger.info(
             "Recorded entry: slug=%s side=%s price=%.3f TP=%.0f%% SL=%.0f%%",
             market_slug, side, entry_price,
@@ -316,16 +397,36 @@ class PositionManager:
             )
         self._entries.pop(token_id, None)
         self._save()
+
         pnl = (current_price - entry.price) / entry.price if entry.price else 0
-        pnl_usd = entry.amount_usd * abs(pnl)
+        pnl_usd = entry.amount_usd * pnl  # signed
         is_tp = "TP" in reason
         is_manual = "Manual" in reason
         emoji = "✅" if is_tp else ("🏳️" if is_manual else "🔴")
+
+        # 30% profit preservation on TP exits
+        reserved_now = 0.0
+        if is_tp and pnl_usd > 0:
+            reserved_now = round(pnl_usd * PROFIT_RESERVE_PCT, 4)
+            self._reserve_usd += reserved_now
+            self._save_reserve()
+            self._day_reserved += reserved_now
+
+        # Daily stats
+        self._day_pnl += pnl_usd
+        if is_tp:
+            self._day_tp += 1
+        elif not is_manual:
+            self._day_sl += 1
+
+        pnl_abs = abs(pnl_usd)
+        reserve_line = f"\n💰 Reserved: ${reserved_now:.2f} (total ${self._reserve_usd:.2f})" if reserved_now > 0 else ""
         msg = (
             f"{emoji} *Position Closed* — {reason}\n"
             f"Market: `{entry.market_slug}`\n"
             f"Side: {entry.side} · Entry: {entry.price:.3f} → Exit: {current_price:.3f}\n"
-            f"P&L: {'+'if pnl>=0 else ''}{pnl:.1%}  (${'+' if pnl>=0 else '-'}{pnl_usd:.2f})"
+            f"P&L: {'+'if pnl>=0 else ''}{pnl:.1%}  (${'+' if pnl>=0 else '-'}{pnl_abs:.2f})"
+            f"{reserve_line}"
         )
         try:
             await self._app.bot.send_message(
@@ -333,4 +434,4 @@ class PositionManager:
             )
         except Exception as exc:
             logger.error("Failed to send close notification: %s", exc)
-        logger.info("Closed position %s: %s", entry.market_slug, reason)
+        logger.info("Closed position %s: %s (reserved $%.4f)", entry.market_slug, reason, reserved_now)
