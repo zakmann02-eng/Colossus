@@ -42,8 +42,6 @@ class PositionManager:
         self._entries: dict[str, _Entry] = {}
         self._load()
 
-    # ── Persistence ───────────────────────────────────────────────────
-
     def _load(self) -> None:
         try:
             with open(_PERSIST_FILE) as f:
@@ -64,14 +62,7 @@ class PositionManager:
         except Exception as exc:
             logger.warning("Failed to save positions.json: %s", exc)
 
-    # ── Public API ────────────────────────────────────────────────────
-
     async def sync_from_exchange(self) -> None:
-        """Pull live open positions from the exchange and register any not yet tracked.
-
-        Called on startup so positions entered before a redeploy are monitored
-        for TP/SL without the user having to manually re-enter them.
-        """
         try:
             live = list(await self._client.get_open_positions() or [])
         except Exception as exc:
@@ -83,12 +74,10 @@ class PositionManager:
         for p in live:
             if not isinstance(p, dict):
                 continue
-            # Slug is nested inside marketMetadata on Polymarket.US
             meta = p.get("marketMetadata") or {}
             slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
             if not slug or slug in tracked_slugs:
                 continue
-            # Side: prefer explicit intent/side, fall back to netPosition sign (negative = NO/short)
             intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
             if "SHORT" in intent or "NO" in intent:
                 side = "NO"
@@ -97,14 +86,12 @@ class PositionManager:
             else:
                 net = float(p.get("netPosition") or p.get("netPositionDecimal") or 0)
                 side = "NO" if net < 0 else "YES"
-            # avgPx and cashValue are {value, currency} dicts on Polymarket.US
             avg_px = p.get("avgPx") or p.get("avgPrice") or p.get("price") or {}
             price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
             cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
             size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
             if price <= 0 or size_usd <= 0:
                 continue
-            # Use slug+side as synthetic key — CLOB price lookup will fall back gracefully
             token_id = f"sync_{slug}_{side}"
             self._entries[token_id] = _Entry(
                 market_slug = slug,
@@ -152,16 +139,9 @@ class PositionManager:
         )
 
     def has_position(self, market_slug: str) -> bool:
-        """Return True if we already track an open position on this market slug."""
         return any(e.market_slug == market_slug for e in self._entries.values())
 
     async def _get_price_for_entry(self, token_id: str, entry: "_Entry") -> float | None:
-        """Get current price for a position.
-
-        For proper 32-char hex CLOB token IDs try CLOB first, then fall back to
-        the portfolio API. For all Polymarket.US slug-based tokens (both sync_ and
-        newly-recorded entries) go straight to the portfolio API.
-        """
         tid = str(token_id)
         is_clob_token = (
             not tid.startswith("sync_")
@@ -173,7 +153,6 @@ class PositionManager:
             if price is not None:
                 return price
 
-        # Portfolio API fallback — covers sync_ tokens and all Polymarket.US slugs
         try:
             positions = await self._client.get_open_positions()
             for p in (positions or []):
@@ -183,29 +162,15 @@ class PositionManager:
                 slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
                 if slug != entry.market_slug:
                     continue
-                # Try explicit current-price fields (flat)
-                for field in ("currentPrice", "marketPrice", "lastPrice",
-                              "lastTradePrice", "markPrice"):
-                    raw = p.get(field)
-                    if raw is not None:
-                        try:
-                            val = float(raw)
-                            if 0 < val <= 1:
-                                return val
-                        except (TypeError, ValueError):
-                            pass
-                # cashValue / |netPosition| — both may be dicts on Polymarket.US
                 cash = p.get("cashValue") or p.get("currentValue") or p.get("value") or {}
                 curr_val = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
                 net_pos = abs(float(p.get("netPosition") or p.get("netPositionDecimal") or 0))
                 if curr_val > 0 and net_pos > 0:
                     return curr_val / net_pos
-                # costPerShare is the per-share price on Polymarket.US
                 cps = p.get("costPerShare") or {}
                 cps_val = float(cps.get("value") if isinstance(cps, dict) else cps or 0)
                 if 0 < cps_val <= 1:
                     return cps_val
-                # Back-calculate from percentPnl if available
                 raw_pnl = p.get("percentPnl") or p.get("unrealizedPnlPercent") or p.get("pnlPercent")
                 if raw_pnl is not None and entry.price > 0:
                     try:
@@ -250,16 +215,12 @@ class PositionManager:
                 logger.error("Unexpected error closing %s: %s", entry.market_slug, exc)
 
     async def sell_all(self) -> int:
-        """Close every tracked position immediately. Returns number closed."""
         count = 0
-
-        # Close positions tracked in _entries (survive crash-restarts)
         for token_id, entry in list(self._entries.items()):
             current_price = await self._get_price_for_entry(token_id, entry) or entry.price
             await self._close(token_id, entry, current_price, "Manual /sellall")
             count += 1
 
-        # Also close any live portfolio positions not in _entries (e.g. after redeploy)
         try:
             live_list = list(await self._client.get_open_positions() or [])
         except Exception:
@@ -272,7 +233,7 @@ class PositionManager:
             meta = p.get("marketMetadata") or {}
             slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
             if not slug or slug in tracked_slugs:
-                continue  # already handled above
+                continue
             intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
             if "SHORT" in intent or "NO" in intent:
                 side = "NO"
@@ -281,10 +242,10 @@ class PositionManager:
             else:
                 net = float(p.get("netPosition") or p.get("netPositionDecimal") or 0)
                 side = "NO" if net < 0 else "YES"
-            avg_px = p.get("avgPx") or p.get("currentPrice") or p.get("price") or p.get("avgPrice") or {}
-            price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
             cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
             size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
+            avg_px = p.get("avgPx") or p.get("avgPrice") or p.get("price") or {}
+            price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
             if size_usd <= 0:
                 continue
             try:
@@ -306,7 +267,6 @@ class PositionManager:
         return count
 
     async def sell_half(self) -> int:
-        """Sell half of each tracked position. Returns number of half-sells executed."""
         if not self._entries:
             return 0
         count = 0
@@ -317,7 +277,6 @@ class PositionManager:
                 await self._client.close_position(
                     entry.market_slug, entry.side, current_price, half_usd
                 )
-                # Keep position but halve the tracked size
                 self._entries[token_id] = _Entry(
                     market_slug = entry.market_slug,
                     side        = entry.side,
