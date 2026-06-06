@@ -104,7 +104,6 @@ async def _scan_markets_inner(
     position_mgr: PositionManager,
 ) -> None:
     if os.getenv("PAUSED", "false").lower() == "true":
-        # Auto-resume if we were paused due to low funds and balance has recovered
         if os.getenv("PAUSED_REASON") == "low_funds":
             balance = await client.get_balance()
             available = max(0.0, balance - position_mgr.reserve_usd)
@@ -139,21 +138,20 @@ async def _scan_markets_inner(
         os.environ["PAUSED_REASON"] = "low_funds"
         return
 
-    markets = await client.get_sports_markets(limit=200)
+    markets = await client.get_sports_markets(limit=50)
     logger.info("Found %d eligible markets", len(markets))
 
-    # Sort by volume but cap at 20 markets per event so one high-volume
-    # game (e.g. NBA Finals) can't crowd out all other sports
+    # Sort by volume but cap at 5 markets per event to spread across sports
     markets.sort(key=lambda m: float(m.get("volume24hr") or m.get("volume24Hour") or 0), reverse=True)
     seen_events: dict[str, int] = {}
     capped: list[dict] = []
     for m in markets:
         event_key = m.get("eventSlug") or m.get("slug") or ""
         count = seen_events.get(event_key, 0)
-        if count < 20:
+        if count < 5:
             capped.append(m)
             seen_events[event_key] = count + 1
-        if len(capped) >= 300:
+        if len(capped) >= 50:
             break
     markets = capped
     logger.info("Evaluating %d markets across %d events", len(markets), len(seen_events))
@@ -165,6 +163,7 @@ async def _scan_markets_inner(
         if mid in _traded_this_session:
             continue
 
+        await asyncio.sleep(0.5)  # 0.5s between markets — ~25 req/min, avoids IP ban
         try:
             signal = await evaluate_market(market, client)
         except Exception as exc:
@@ -174,7 +173,6 @@ async def _scan_markets_inner(
         if signal is None:
             continue
 
-        # Skip if we already have an open position on this market (survives redeployments)
         if position_mgr.has_position(signal.market_slug):
             logger.info("SKIP already-positioned: %s", signal.market_slug)
             continue
@@ -258,7 +256,6 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         curr = p.get("currentPrice") or p.get("marketPrice") or p.get("lastPrice") or "?"
         pnl  = p.get("percentPnl") or p.get("pnlPercent") or p.get("unrealizedPnlPercent") or "?"
         lines.append(f"• `{slug}`\n  size={size} avg={avg} now={curr} pnl={pnl}%")
-    # If every position had no recognisable fields, show raw keys for diagnosis
     if len(lines) == 1 and positions and isinstance(positions[0], dict):
         lines.append(f"_(fields: {', '.join(positions[0].keys())})_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
@@ -333,7 +330,6 @@ async def main() -> None:
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
-    # Register any positions already open on the exchange so TP/SL fires on them
     await pos_mgr.sync_from_exchange()
 
     mode = "Auto-trading" if trading_enabled else "Signal-alert mode (no client)"
