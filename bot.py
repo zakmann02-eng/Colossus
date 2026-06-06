@@ -27,8 +27,6 @@ from position_manager import PositionManager
 
 load_dotenv()
 
-# ── Logging ──────────────────────────────────────────────────────────────────
-
 def _setup_logging() -> None:
     handler = colorlog.StreamHandler()
     handler.setFormatter(colorlog.ColoredFormatter(
@@ -49,8 +47,6 @@ def _setup_logging() -> None:
 
 _setup_logging()
 logger = logging.getLogger(__name__)
-
-# ── Config ───────────────────────────────────────────────────────────────────
 
 def _require(name: str) -> str:
     val = os.getenv(name, "").strip()
@@ -73,8 +69,6 @@ SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL",     "60"))
 _traded_this_session: set[str] = set()
 
 
-# ── Telegram helpers ──────────────────────────────────────────────────────────
-
 async def _send(app: Application, text: str) -> None:
     try:
         await app.bot.send_message(
@@ -84,8 +78,6 @@ async def _send(app: Application, text: str) -> None:
     except Exception as exc:
         logger.error("Telegram send failed: %s", exc)
 
-
-# ── Core scan job ─────────────────────────────────────────────────────────────
 
 async def scan_markets(
     client: PolymarketClient,
@@ -210,8 +202,6 @@ async def _scan_markets_inner(
         logger.info("No signals this scan")
 
 
-# ── Telegram commands ─────────────────────────────────────────────────────────
-
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     text = (
@@ -241,12 +231,10 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not isinstance(p, dict):
             lines.append(f"• (non-dict entry: {str(p)[:60]})")
             continue
-        # Polymarket.US nests slug inside marketMetadata
         meta = p.get("marketMetadata") or {}
         slug = (meta.get("slug") or p.get("marketSlug") or p.get("slug") or "unknown")[:30]
         outcome = meta.get("outcome") or ""
         net = p.get("netPosition") or p.get("netPositionDecimal") or "?"
-        # avgPx and cashValue are {value, currency} dicts on Polymarket.US
         avg_px = p.get("avgPx") or p.get("avgPrice") or {}
         avg  = avg_px.get("value") if isinstance(avg_px, dict) else avg_px or "?"
         cash = p.get("cashValue") or {}
@@ -290,8 +278,6 @@ async def cmd_sellhalf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await update.message.reply_text("No tracked positions to sell.")
 
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
     logger.info("Colossus starting up…")
