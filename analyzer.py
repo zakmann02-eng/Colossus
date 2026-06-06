@@ -3,11 +3,11 @@ Trigger evaluation and trade decision logic.
 
 Pre-filters (all must pass):
   - Price between 0.25 and 0.75 (no extreme underdogs/favorites)
-  - Minimum $500 24h volume
+  - Minimum $100 24h volume
   - Must resolve within 7 days (weekly/daily trading)
 
 Need 2+ triggers to fire a trade:
-  T1  Price inside 40-60% range (coin-flip uncertainty — market is genuinely unsettled)
+  T1  Price inside 35-65% range (contested market — neither side is a heavy favourite)
   T2  Game is currently in-play (started but not yet resolved — live volatility)
   T3  24h volume > 1.5x daily average (unusual interest)
   T4  Resolves within 48h (imminent resolution — tight time window)
@@ -47,11 +47,11 @@ _LIVE_STATES = {
 
 MIN_PRICE    = 0.25
 MAX_PRICE    = 0.75
-MIN_VOL_24H  = 500.0
+MIN_VOL_24H  = 100.0
 MAX_DAYS_OUT = 7 * 86_400
 
-T1_LOW  = 0.40
-T1_HIGH = 0.60
+T1_LOW  = 0.35
+T1_HIGH = 0.65
 T3_MULT = 1.5
 T4_SECS = 2 * 86_400   # 48h window
 
