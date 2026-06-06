@@ -1,450 +1,210 @@
+"""
+Trigger evaluation and trade decision logic.
+
+Pre-filters (all must pass):
+  - Price between 0.25 and 0.75 (no extreme underdogs/favorites)
+  - Minimum $100 24h volume
+  - Must resolve within 7 days (weekly/daily trading)
+
+Any 1 trigger fires a trade:
+  T1  Price inside 40-60% range (coin-flip uncertainty — market is genuinely unsettled)
+  T2  Game is currently in-play (started but not yet resolved — live volatility)
+  T3  24h volume > 1.5x daily average (unusual interest)
+  T4  Resolves within 48h (imminent resolution — tight time window)
+
+Position sizing by triggers fired:
+  1 trigger  → LOW  → $0.10–$0.35  · TP 15% · SL 5%
+  2 triggers → MED  → $0.35–$0.65  · TP 20% · SL 8%
+  3+ triggers→ HIGH → $0.65–$1.00  · TP 25% · SL 10%
+"""
+
 from __future__ import annotations
 
-import json
 import logging
-import os
-from dataclasses import asdict, dataclass
+import random
+import re
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from polymarket_client import PolymarketClient
-    from telegram.ext import Application
 
 logger = logging.getLogger(__name__)
 
-_PERSIST_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
-_RESERVE_FILE = os.path.join(os.path.dirname(__file__), "reserve.json")
+# Intra-game period markets resolve in minutes — no edge, catastrophic SL bleed
+_PERIOD_RE = re.compile(
+    r'\b([1-4][QqHh]|[QqHh][1-4]|1st|2nd|3rd|4th)\b'
+    r'|quarter|halftime|half.time|period\s*\d|inning\s*\d',
+    re.IGNORECASE,
+)
 
-PROFIT_RESERVE_PCT = 0.30  # 30% of each TP profit locked away
+MIN_PRICE    = 0.25
+MAX_PRICE    = 0.75
+MIN_VOL_24H  = 100.0
+MAX_DAYS_OUT = 7 * 86_400
 
+T1_LOW  = 0.40
+T1_HIGH = 0.60
+T3_MULT = 1.5
+T4_SECS = 2 * 86_400   # tightened: 48h (was 7 days — always fired, added no signal)
 
-_PRICE_MISS_LIMIT = 5  # force-close after this many consecutive price misses
+_TIERS = {
+    1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, "tp": 0.15, "sl": 0.05},
+    2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.20, "sl": 0.08},
+    3: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.25, "sl": 0.10},
+}
+
 
 @dataclass
-class _Entry:
-    market_slug:  str
-    side:         str
-    price:        float
-    tp:           float
-    sl:           float
-    amount_usd:   float = 0.50
-    price_misses: int   = 0  # consecutive cycles where price lookup returned None
+class TradeSignal:
+    market_id:   str
+    market_slug: str
+    question:    str
+    side:        str
+    token_id:    str
+    price_now:   float
+    triggers:    list[str] = field(default_factory=list)
+    score:       int       = 0
+    event_date:  str       = "N/A"
+    amount_usd:  float     = 0.50
+    tp_pct:      float     = 0.08
+    sl_pct:      float     = 0.12
+    conviction:  str       = "LOW"
 
 
-class PositionManager:
-    def __init__(
-        self,
-        client: "PolymarketClient",
-        app: "Application",
-        chat_id: int,
-        default_tp: float,
-        default_sl: float,
-    ) -> None:
-        self._client     = client
-        self._app        = app
-        self._chat_id    = chat_id
-        self._default_tp = default_tp
-        self._default_sl = default_sl
-        self._entries: dict[str, _Entry] = {}
+def _safe_float(val, default: float = 0.0) -> float:
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
 
-        # Profit reserve — persisted across restarts
-        self._reserve_usd: float = 0.0
 
-        # Daily stats — reset at midnight UTC by send_daily_report()
-        self._day_opened:   int   = 0
-        self._day_tp:       int   = 0
-        self._day_sl:       int   = 0
-        self._day_pnl:      float = 0.0
-        self._day_reserved: float = 0.0
+def _parse_ts(raw) -> float:
+    if raw is None:
+        return 0.0
+    try:
+        ts = float(raw)
+        if ts > 1_000_000_000:
+            return ts
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
 
-        self._load()
-        self._load_reserve()
 
-    # ── Persistence ───────────────────────────────────────────────────
+def _decide_side(price: float, market: dict | None = None) -> str:
+    if market:
+        best_ask = _safe_float(market.get("bestAsk") or market.get("bestAskPrice"))
+        best_bid = _safe_float(market.get("bestBid") or market.get("bestBidPrice"))
+        if best_ask > 0 and best_bid > 0:
+            mid = (best_ask + best_bid) / 2
+            return "YES" if mid >= 0.50 else "NO"
+    return "YES" if price >= 0.50 else "NO"
 
-    def _load(self) -> None:
-        try:
-            with open(_PERSIST_FILE) as f:
-                data = json.load(f)
-            for token_id, d in data.items():
-                self._entries[token_id] = _Entry(**d)
-            if self._entries:
-                logger.info("Loaded %d persisted positions from disk", len(self._entries))
-        except FileNotFoundError:
-            pass
-        except Exception as exc:
-            logger.warning("Failed to load positions.json: %s", exc)
 
-    def _save(self) -> None:
-        try:
-            with open(_PERSIST_FILE, "w") as f:
-                json.dump({k: asdict(v) for k, v in self._entries.items()}, f)
-        except Exception as exc:
-            logger.warning("Failed to save positions.json: %s", exc)
+def _size_position(n_triggers: int) -> tuple[float, float, float, str]:
+    tier = _TIERS.get(n_triggers) or _TIERS[3]
+    return round(random.uniform(tier["min_usd"], tier["max_usd"]), 2), tier["tp"], tier["sl"], tier["label"]
 
-    def _load_reserve(self) -> None:
-        try:
-            with open(_RESERVE_FILE) as f:
-                data = json.load(f)
-            self._reserve_usd = float(data.get("reserve_usd", 0.0))
-            logger.info("Loaded profit reserve: $%.2f", self._reserve_usd)
-        except FileNotFoundError:
-            pass
-        except Exception as exc:
-            logger.warning("Failed to load reserve.json: %s", exc)
 
-    def _save_reserve(self) -> None:
-        try:
-            with open(_RESERVE_FILE, "w") as f:
-                json.dump({"reserve_usd": round(self._reserve_usd, 4)}, f)
-        except Exception as exc:
-            logger.warning("Failed to save reserve.json: %s", exc)
+async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSignal | None:
 
-    # ── Public API ────────────────────────────────────────────────────
+    question    = market.get("question") or market.get("title") or ""
+    market_id   = market.get("id") or market.get("conditionId") or ""
+    market_slug = client.get_market_slug(market)
 
-    @property
-    def reserve_usd(self) -> float:
-        return self._reserve_usd
-
-    def record_trade_opened(self) -> None:
-        self._day_opened += 1
-
-    async def send_daily_report(self) -> None:
-        """Send end-of-day P&L report to Telegram and reset daily counters."""
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        total_closed = self._day_tp + self._day_sl
-        win_rate = f"{self._day_tp / total_closed:.0%}" if total_closed > 0 else "N/A"
-        pnl_sign = "+" if self._day_pnl >= 0 else ""
-        balance = await self._client.get_balance()
-
-        msg = (
-            f"📊 *Colossus Daily Report — {now}*\n\n"
-            f"Trades opened:  {self._day_opened}\n"
-            f"Closed TP ✅:   {self._day_tp}\n"
-            f"Closed SL 🔴:   {self._day_sl}\n"
-            f"Win rate:        {win_rate}\n\n"
-            f"Day P&L:         {pnl_sign}${self._day_pnl:.2f}\n"
-            f"Reserved today:  ${self._day_reserved:.2f}\n"
-            f"Total reserve:   ${self._reserve_usd:.2f}\n\n"
-            f"Account balance: ${balance:.2f}\n"
-            f"Available:       ${max(0.0, balance - self._reserve_usd):.2f}"
-        )
-        try:
-            await self._app.bot.send_message(
-                chat_id=self._chat_id, text=msg, parse_mode="Markdown",
-            )
-        except Exception as exc:
-            logger.error("Failed to send daily report: %s", exc)
-
-        # Reset daily counters
-        self._day_opened   = 0
-        self._day_tp       = 0
-        self._day_sl       = 0
-        self._day_pnl      = 0.0
-        self._day_reserved = 0.0
-        logger.info("Daily report sent and counters reset")
-
-    async def sync_from_exchange(self) -> None:
-        try:
-            live = list(await self._client.get_open_positions() or [])
-        except Exception as exc:
-            logger.warning("sync_from_exchange: get_open_positions failed: %s", exc)
-            return
-
-        tracked_slugs = {e.market_slug for e in self._entries.values()}
-        added = 0
-        for p in live:
-            if not isinstance(p, dict):
-                continue
-            meta = p.get("marketMetadata") or {}
-            slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
-            if not slug or slug in tracked_slugs:
-                continue
-            intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
-            if "SHORT" in intent or "NO" in intent:
-                side = "NO"
-            elif "LONG" in intent or "YES" in intent:
-                side = "YES"
-            else:
-                net = float(p.get("netPosition") or p.get("netPositionDecimal") or 0)
-                side = "NO" if net < 0 else "YES"
-            avg_px = p.get("avgPx") or p.get("avgPrice") or p.get("price") or {}
-            price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
-            cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
-            size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
-            if price <= 0 or size_usd <= 0:
-                continue
-            token_id = f"sync_{slug}_{side}"
-            self._entries[token_id] = _Entry(
-                market_slug = slug,
-                side        = side,
-                price       = price,
-                tp          = self._default_tp,
-                sl          = self._default_sl,
-                amount_usd  = size_usd,
-            )
-            tracked_slugs.add(slug)
-            added += 1
-
-        if added:
-            self._save()
-            logger.info("Synced %d live position(s) from exchange into TP/SL tracker", added)
-        else:
-            logger.info("sync_from_exchange: no new positions to register")
-        if live:
-            logger.info("Raw portfolio position sample: %s", live[0])
-
-    def record_entry(
-        self,
-        token_id:    str,
-        market_slug: str,
-        side:        str,
-        entry_price: float,
-        tp_pct:      float | None = None,
-        sl_pct:      float | None = None,
-        amount_usd:  float = 0.50,
-    ) -> None:
-        self._entries[token_id] = _Entry(
-            market_slug = market_slug,
-            side        = side,
-            price       = entry_price,
-            tp          = tp_pct if tp_pct is not None else self._default_tp,
-            sl          = sl_pct if sl_pct is not None else self._default_sl,
-            amount_usd  = amount_usd,
-        )
-        self._save()
-        self._day_opened += 1
-        logger.info(
-            "Recorded entry: slug=%s side=%s price=%.3f TP=%.0f%% SL=%.0f%%",
-            market_slug, side, entry_price,
-            (tp_pct or self._default_tp) * 100,
-            (sl_pct or self._default_sl) * 100,
-        )
-
-    def has_position(self, market_slug: str) -> bool:
-        return any(e.market_slug == market_slug for e in self._entries.values())
-
-    async def _get_price_for_entry(self, token_id: str, entry: "_Entry") -> float | None:
-        tid = str(token_id)
-        is_clob_token = (
-            not tid.startswith("sync_")
-            and len(tid) >= 32
-            and tid.replace("-", "").isalnum()
-        )
-        if is_clob_token:
-            price = await self._client.get_current_price(token_id)
-            if price is not None:
-                return price
-
-        try:
-            positions = await self._client.get_open_positions()
-            for p in (positions or []):
-                if not isinstance(p, dict):
-                    continue
-                meta = p.get("marketMetadata") or {}
-                slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
-                if slug != entry.market_slug:
-                    continue
-                cash = p.get("cashValue") or p.get("currentValue") or p.get("value") or {}
-                curr_val = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
-                net_pos = abs(float(p.get("netPosition") or p.get("netPositionDecimal") or 0))
-                if curr_val > 0 and net_pos > 0:
-                    return curr_val / net_pos
-                cps = p.get("costPerShare") or {}
-                cps_val = float(cps.get("value") if isinstance(cps, dict) else cps or 0)
-                if 0 < cps_val <= 1:
-                    return cps_val
-                raw_pnl = p.get("percentPnl") or p.get("unrealizedPnlPercent") or p.get("pnlPercent")
-                if raw_pnl is not None and entry.price > 0:
-                    try:
-                        pnl = float(raw_pnl)
-                        if abs(pnl) > 1:
-                            pnl /= 100
-                        return entry.price * (1 + pnl)
-                    except (TypeError, ValueError):
-                        pass
-                logger.info("Cannot resolve current price for %s — raw position: %s",
-                            entry.market_slug, p)
-        except Exception as exc:
-            logger.warning("Portfolio price lookup failed for %s: %s", entry.market_slug, exc)
+    # Block intra-game period markets (1Q/2Q/3Q/4Q/1H/2H totals & spreads)
+    if _PERIOD_RE.search(question) or _PERIOD_RE.search(market_slug or ""):
+        logger.info("SKIP period-market: %s", question[:60])
         return None
 
-    async def check_positions(self) -> None:
-        if not self._entries:
-            logger.debug("No tracked positions — skipping TP/SL check")
-            return
-        logger.info("Checking %d tracked position(s) for TP/SL…", len(self._entries))
-        for token_id, entry in list(self._entries.items()):
-            current_price = await self._get_price_for_entry(token_id, entry)
-            if current_price is None:
-                entry.price_misses += 1
-                logger.warning(
-                    "No price for %s (token=%s…) — miss %d/%d",
-                    entry.market_slug, token_id[:12], entry.price_misses, _PRICE_MISS_LIMIT,
-                )
-                if entry.price_misses >= _PRICE_MISS_LIMIT:
-                    logger.error(
-                        "Force-closing %s — price unresolvable for %d consecutive cycles",
-                        entry.market_slug, _PRICE_MISS_LIMIT,
-                    )
-                    await self._close(token_id, entry, entry.price, "SL-Force (price unavailable)")
-                else:
-                    self._save()
-                continue
-            entry.price_misses = 0
-            pnl = (current_price - entry.price) / entry.price if entry.price else 0
-            logger.info(
-                "Position: %s %s  entry=%.3f  now=%.3f  pnl=%+.1f%%  (TP=%.0f%% SL=%.0f%%)",
-                entry.market_slug, entry.side,
-                entry.price, current_price, pnl * 100,
-                entry.tp * 100, entry.sl * 100,
-            )
-            try:
-                if pnl >= entry.tp:
-                    await self._close(token_id, entry, current_price, f"TP +{pnl:.1%}")
-                elif pnl <= -entry.sl:
-                    await self._close(token_id, entry, current_price, f"SL {pnl:.1%}")
-            except Exception as exc:
-                logger.error("Unexpected error closing %s: %s", entry.market_slug, exc)
+    token_id = client.resolve_token_id(market, "YES")
+    if not token_id:
+        logger.info("SKIP no-token: %s", question[:60])
+        return None
 
-    async def sell_all(self) -> int:
-        count = 0
-        for token_id, entry in list(self._entries.items()):
-            current_price = await self._get_price_for_entry(token_id, entry) or entry.price
-            await self._close(token_id, entry, current_price, "Manual /sellall")
-            count += 1
+    secs = client.seconds_to_resolution(market)
+    if secs is not None and (secs <= 0 or secs > MAX_DAYS_OUT):
+        logger.info("SKIP time(%.1fd): %s", secs / 86400, question[:60])
+        return None
 
-        try:
-            live_list = list(await self._client.get_open_positions() or [])
-        except Exception:
-            live_list = []
+    vol_24h = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
+    if vol_24h > 0 and vol_24h < MIN_VOL_24H:
+        logger.info("SKIP vol(%.0f): %s", vol_24h, question[:60])
+        return None
 
-        tracked_slugs = {e.market_slug for e in self._entries.values()}
-        for p in live_list:
-            if not isinstance(p, dict):
-                continue
-            meta = p.get("marketMetadata") or {}
-            slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
-            if not slug or slug in tracked_slugs:
-                continue
-            intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
-            if "SHORT" in intent or "NO" in intent:
-                side = "NO"
-            elif "LONG" in intent or "YES" in intent:
-                side = "YES"
-            else:
-                net = float(p.get("netPosition") or p.get("netPositionDecimal") or 0)
-                side = "NO" if net < 0 else "YES"
-            cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
-            size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
-            avg_px = p.get("avgPx") or p.get("avgPrice") or p.get("price") or {}
-            price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
-            if size_usd <= 0:
-                continue
-            try:
-                await self._client.close_position(slug, side, price, size_usd)
-                pnl_pct = float(p.get("percentPnl") or p.get("pnl") or 0)
-                msg = (
-                    f"🏳️ *Position Closed* — Manual /sellall\n"
-                    f"Market: `{slug}`\n"
-                    f"Side: {side} · Exit: {price:.3f}\n"
-                    f"P&L: {'+' if pnl_pct >= 0 else ''}{pnl_pct:.1f}%"
-                )
-                await self._app.bot.send_message(
-                    chat_id=self._chat_id, text=msg, parse_mode="Markdown",
-                )
-                count += 1
-            except Exception as exc:
-                logger.error("sell_all live close failed for %s: %s", slug, exc)
+    price = await client.get_market_price(market, token_id)
+    if not price:
+        logger.info("SKIP no-price (token=%s…): %s", str(token_id)[:16], question[:60])
+        return None
 
-        return count
+    if price < MIN_PRICE or price > MAX_PRICE:
+        logger.info("SKIP price(%.3f): %s", price, question[:60])
+        return None
 
-    async def sell_half(self) -> int:
-        if not self._entries:
-            return 0
-        count = 0
-        for token_id, entry in list(self._entries.items()):
-            current_price = await self._get_price_for_entry(token_id, entry) or entry.price
-            half_usd = round(entry.amount_usd / 2, 2)
-            try:
-                await self._client.close_position(
-                    entry.market_slug, entry.side, current_price, half_usd
-                )
-                self._entries[token_id] = _Entry(
-                    market_slug = entry.market_slug,
-                    side        = entry.side,
-                    price       = entry.price,
-                    tp          = entry.tp,
-                    sl          = entry.sl,
-                    amount_usd  = half_usd,
-                )
-                self._save()
-                pnl = (current_price - entry.price) / entry.price if entry.price else 0
-                pnl_usd = half_usd * abs(pnl)
-                msg = (
-                    f"✂️ *Half Sold* — `{entry.market_slug}`\n"
-                    f"Sold ${half_usd:.2f} of {entry.side} @ {current_price:.3f}\n"
-                    f"P&L on half: {'+'if pnl>=0 else ''}{pnl:.1%} (${pnl_usd:.2f})\n"
-                    f"Remaining: ${half_usd:.2f} still open"
-                )
-                await self._app.bot.send_message(
-                    chat_id=self._chat_id, text=msg, parse_mode="Markdown",
-                )
-                count += 1
-            except Exception as exc:
-                logger.error("sell_half failed for %s: %s", entry.market_slug, exc)
-        return count
+    triggers: list[str] = []
+    now = time.time()
 
-    async def _close(
-        self, token_id: str, entry: _Entry, current_price: float, reason: str
-    ) -> None:
-        try:
-            await self._client.close_position(
-                entry.market_slug, entry.side, current_price, entry.amount_usd
-            )
-        except Exception as exc:
-            logger.error(
-                "close_position API call failed for %s: %s — removing from tracker anyway",
-                entry.market_slug, exc,
-            )
-        self._entries.pop(token_id, None)
-        self._save()
+    # T1: price near 50/50 — genuinely contested market
+    if T1_LOW <= price <= T1_HIGH:
+        triggers.append(f"T1:prob={price:.2f}")
 
-        pnl = (current_price - entry.price) / entry.price if entry.price else 0
-        pnl_usd = entry.amount_usd * pnl  # signed
-        is_tp = "TP" in reason
-        is_manual = "Manual" in reason
-        emoji = "✅" if is_tp else ("🏳️" if is_manual else "🔴")
+    # T2: game is currently live (started but not yet resolved)
+    # Replaces the old CLOB-based 15-min price movement check which never
+    # fired for Polymarket.US slug-based tokens.
+    game_start_raw = market.get("gameStartTime") or market.get("startTime") or market.get("startDate")
+    if game_start_raw:
+        start_ts = _parse_ts(game_start_raw)
+        if 0 < start_ts < now:
+            triggers.append("T2:live")
 
-        # 30% profit preservation on TP exits
-        reserved_now = 0.0
-        if is_tp and pnl_usd > 0:
-            reserved_now = round(pnl_usd * PROFIT_RESERVE_PCT, 4)
-            self._reserve_usd += reserved_now
-            self._save_reserve()
-            self._day_reserved += reserved_now
+    # T3: 24h volume is unusually high relative to historical daily average
+    vol_all   = _safe_float(market.get("volume") or market.get("volumeNum"))
+    days_est  = max(1.0, _safe_float(market.get("daysAgo"), 7.0))
+    daily_avg = vol_all / days_est if vol_all else 0
+    if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
+        triggers.append(f"T3:vol24h={vol_24h:.0f}")
 
-        # Daily stats
-        self._day_pnl += pnl_usd
-        if is_tp:
-            self._day_tp += 1
-        elif not is_manual:
-            self._day_sl += 1
+    # T4: resolves within 48h — imminent outcome, tighter edge window
+    if secs is not None and 0 < secs <= T4_SECS:
+        triggers.append(f"T4:hrs={secs/3600:.0f}h")
 
-        pnl_abs = abs(pnl_usd)
-        reserve_line = f"\n💰 Reserved: ${reserved_now:.2f} (total ${self._reserve_usd:.2f})" if reserved_now > 0 else ""
-        msg = (
-            f"{emoji} *Position Closed* — {reason}\n"
-            f"Market: `{entry.market_slug}`\n"
-            f"Side: {entry.side} · Entry: {entry.price:.3f} → Exit: {current_price:.3f}\n"
-            f"P&L: {'+'if pnl>=0 else ''}{pnl:.1%}  (${'+' if pnl>=0 else '-'}{pnl_abs:.2f})"
-            f"{reserve_line}"
-        )
-        try:
-            await self._app.bot.send_message(
-                chat_id=self._chat_id, text=msg, parse_mode="Markdown",
-            )
-        except Exception as exc:
-            logger.error("Failed to send close notification: %s", exc)
-        logger.info("Closed position %s: %s (reserved $%.4f)", entry.market_slug, reason, reserved_now)
+    if not triggers:
+        logger.info("SKIP no-triggers (price=%.2f): %s", price, question[:60])
+        return None
+
+    side = _decide_side(price, market)
+    trade_token = token_id if side == "YES" else (client.resolve_token_id(market, "NO") or token_id)
+
+    if not await client.has_liquidity(trade_token, min_usd=0.10):
+        logger.info("SKIP no-liquidity: %s", question[:60])
+        return None
+
+    amount, tp, sl, label = _size_position(len(triggers))
+    score = min(100, 25 + len(triggers) * 25)
+
+    signal = TradeSignal(
+        market_id   = market_id,
+        market_slug = market_slug,
+        question    = question,
+        side        = side,
+        token_id    = trade_token,
+        price_now   = price,
+        triggers    = triggers,
+        score       = score,
+        event_date  = client.get_event_date(market),
+        amount_usd  = amount,
+        tp_pct      = tp,
+        sl_pct      = sl,
+        conviction  = label,
+    )
+
+    logger.info(
+        "Signal: %s | %s @ %.2f | slug=%s conviction=%s amount=$%.2f triggers=%s",
+        question[:50], side, price, market_slug or "NO-SLUG", label, amount, triggers,
+    )
+    return signal
