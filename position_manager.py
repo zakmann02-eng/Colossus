@@ -19,14 +19,17 @@ _RESERVE_FILE = os.path.join(os.path.dirname(__file__), "reserve.json")
 PROFIT_RESERVE_PCT = 0.30  # 30% of each TP profit locked away
 
 
+_PRICE_MISS_LIMIT = 5  # force-close after this many consecutive price misses
+
 @dataclass
 class _Entry:
-    market_slug: str
-    side:        str
-    price:       float
-    tp:          float
-    sl:          float
-    amount_usd:  float = 0.50
+    market_slug:  str
+    side:         str
+    price:        float
+    tp:           float
+    sl:           float
+    amount_usd:   float = 0.50
+    price_misses: int   = 0  # consecutive cycles where price lookup returned None
 
 
 class PositionManager:
@@ -275,11 +278,21 @@ class PositionManager:
         for token_id, entry in list(self._entries.items()):
             current_price = await self._get_price_for_entry(token_id, entry)
             if current_price is None:
+                entry.price_misses += 1
                 logger.warning(
-                    "No price for %s (token=%s…) — skipping this cycle",
-                    entry.market_slug, token_id[:12],
+                    "No price for %s (token=%s…) — miss %d/%d",
+                    entry.market_slug, token_id[:12], entry.price_misses, _PRICE_MISS_LIMIT,
                 )
+                if entry.price_misses >= _PRICE_MISS_LIMIT:
+                    logger.error(
+                        "Force-closing %s — price unresolvable for %d consecutive cycles",
+                        entry.market_slug, _PRICE_MISS_LIMIT,
+                    )
+                    await self._close(token_id, entry, entry.price, "SL-Force (price unavailable)")
+                else:
+                    self._save()
                 continue
+            entry.price_misses = 0
             pnl = (current_price - entry.price) / entry.price if entry.price else 0
             logger.info(
                 "Position: %s %s  entry=%.3f  now=%.3f  pnl=%+.1f%%  (TP=%.0f%% SL=%.0f%%)",
