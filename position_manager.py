@@ -228,12 +228,16 @@ class PositionManager:
 
     @staticmethod
     def _slug_match(stored: str, api_slug: str) -> bool:
-        """Fuzzy match — handles trailing suffixes the exchange appends to slugs."""
+        """Fuzzy match slugs.
+
+        The scan API returns event slugs (e.g. 'lol-dk-bro-2026-06-06') while
+        the portfolio API returns market slugs with a prefix (e.g. 'aec-lol-dk-bro-2026-06-06').
+        Substring check handles both directions.
+        """
         if not stored or not api_slug:
             return False
         s, a = stored.lower().strip("-"), api_slug.lower().strip("-")
-        return s == a or a.startswith(s) or s.startswith(a)
-
+        return s == a or a.startswith(s) or s.startswith(a) or s in a or a in s
     async def _get_price_for_entry(self, token_id: str, entry: "_Entry") -> float | None:
         tid = str(token_id)
         is_clob_token = (
