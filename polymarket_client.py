@@ -63,7 +63,7 @@ class PolymarketClient:
             return None
 
     # ---------------------------------------------------------------- #
-    # Market scanning                                                   #
+    # Market scanning                                                    #
     # ---------------------------------------------------------------- #
 
     async def get_sports_markets(self, limit=200):
@@ -180,11 +180,9 @@ class PolymarketClient:
 
     def _is_allowed(self, market):
         if not market.get("active", True) or market.get("closed", False):
-            logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
         secs = self.seconds_to_resolution(market)
         if secs is not None and secs <= 0:
-            logger.debug("BLOCKED resolved(%.1fd ago): %s", abs(secs) / 86400, (market.get("question") or "")[:60])
             return False
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
@@ -268,10 +266,8 @@ class PolymarketClient:
         ask_depth = sum(float(a.get("size", 0)) for a in asks[:3])
         bid_depth = sum(float(b.get("size", 0)) for b in bids[:3])
         if ask_depth < min_usd or bid_depth < min_usd:
-            logger.debug(
-                "Thin CLOB book for token %s… ask=%.2f bid=%.2f",
-                tid[:12], ask_depth, bid_depth,
-            )
+            logger.debug("Thin CLOB book for token %s… ask=%.2f bid=%.2f",
+                         tid[:12], ask_depth, bid_depth)
             return False
         return True
 
@@ -310,15 +306,17 @@ class PolymarketClient:
             if isinstance(data, list):
                 return data
             if isinstance(data, dict):
+                # API returns {"positions": null, "nextCursor": ..., "eof": true}
+                # when there are no open positions — treat null/missing as empty list
                 for key in ("positions", "data", "items", "portfolio", "results"):
                     if key not in data:
                         continue
                     val = data[key]
                     if isinstance(val, list):
                         return val
-                    if val is None:
-                        return []
-                logger.warning("get_open_positions: unrecognised response shape — keys: %s", list(data.keys()))
+                    # key present but null → no positions
+                    return []
+            logger.warning("get_open_positions: unexpected type %s", type(data))
             return []
         except Exception as exc:
             logger.warning("get_open_positions failed: %s", exc)
@@ -327,20 +325,6 @@ class PolymarketClient:
     # ---------------------------------------------------------------- #
     # Order placement                                                   #
     # ---------------------------------------------------------------- #
-
-    async def cancel_order(self, order_id: str) -> bool:
-        if not self._us_client or not order_id:
-            return False
-        loop = asyncio.get_event_loop()
-        try:
-            await loop.run_in_executor(
-                None, lambda: self._us_client.orders.cancel(order_id)
-            )
-            logger.info("Cancelled pending order %s", order_id)
-            return True
-        except Exception as exc:
-            logger.warning("Failed to cancel order %s: %s", order_id, exc)
-            return False
 
     async def place_market_order(
         self, market_slug: str, side: str, price: float, amount_usd: float
@@ -365,11 +349,11 @@ class PolymarketClient:
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
         intent = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
-        # 5-cent buffer to cross the spread and get immediate IOC fills
+        # 3-cent buffer makes the order more attractive in the book → faster fills
         if side == "YES":
-            order_price = round(min(price + 0.05, 0.97), 4)
+            order_price = round(min(price + 0.03, 0.97), 4)
         else:
-            order_price = round(max(price - 0.05, 0.03), 4)
+            order_price = round(max(price - 0.03, 0.03), 4)
         quantity = max(1, round(amount_usd / order_price))
         order = {
             "marketSlug": market_slug,
@@ -377,7 +361,7 @@ class PolymarketClient:
             "type":       "ORDER_TYPE_LIMIT",
             "price":      {"value": str(order_price), "currency": "USD"},
             "quantity":   quantity,
-            "tif":        "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+            "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
         }
         logger.info("Placing order: %s", order)
         try:
@@ -393,6 +377,42 @@ class PolymarketClient:
         except Exception as exc:
             logger.error("Order error: %s", exc)
         return None
+
+    async def get_order_status(self, order_id: str) -> dict | None:
+        if not self._us_client or not order_id:
+            return None
+        loop = asyncio.get_event_loop()
+        try:
+            orders_api = getattr(self._us_client, "orders", None)
+            if orders_api is None:
+                return None
+            getter = getattr(orders_api, "get", None) or getattr(orders_api, "retrieve", None)
+            if getter is None:
+                logger.warning("SDK has no orders.get/retrieve — cannot poll order status")
+                return None
+            return await loop.run_in_executor(None, lambda: getter(order_id))
+        except Exception as exc:
+            logger.warning("get_order_status(%s) failed: %s", order_id[:8], exc)
+            return None
+
+    async def cancel_order(self, order_id: str) -> bool:
+        if not self._us_client or not order_id:
+            return False
+        loop = asyncio.get_event_loop()
+        try:
+            orders_api = getattr(self._us_client, "orders", None)
+            if orders_api is None:
+                return False
+            canceller = getattr(orders_api, "cancel", None) or getattr(orders_api, "delete", None)
+            if canceller is None:
+                logger.warning("SDK has no orders.cancel/delete — cannot cancel order")
+                return False
+            await loop.run_in_executor(None, lambda: canceller(order_id))
+            logger.info("Cancelled order %s…", order_id[:16])
+            return True
+        except Exception as exc:
+            logger.warning("cancel_order(%s) failed: %s", order_id[:8], exc)
+            return False
 
     async def close_position(
         self, market_slug: str, side: str, price: float, size_usd: float
@@ -433,7 +453,8 @@ class PolymarketClient:
                 logger.info("Close response: %s", resp)
                 return resp
             except BadRequestError as exc:
-                logger.warning("Close intent %s rejected for %s: %s — trying fallback", intent, market_slug, exc)
+                logger.warning("Close intent %s rejected for %s: %s — trying fallback",
+                               intent, market_slug, exc)
             except AuthenticationError as exc:
                 logger.error("Auth error closing %s: %s", market_slug, exc)
                 return None
@@ -542,17 +563,17 @@ class PolymarketClient:
         if token_id and len(str(token_id)) >= 32 and str(token_id).replace("-", "").isalnum():
             return await self.get_current_price(token_id)
 
-        logger.debug("no-price fields for '%s': marketSides=%r outcomes=%r op=%r", question, sides, outcomes, op)
+        logger.debug("no-price fields for '%s': marketSides=%r outcomes=%r op=%r",
+                     question, sides, outcomes, op)
         return None
 
     def get_market_slug(self, market: dict) -> str:
-        candidates = [
-            market.get("marketSlug"),
-            market.get("slug"),
-            market.get("eventSlug"),
-        ]
-        slugs = [s for s in candidates if s]
-        return max(slugs, key=len) if slugs else ""
+        return (
+            market.get("slug")
+            or market.get("marketSlug")
+            or market.get("eventSlug")
+            or ""
+        )
 
     def get_event_date(self, market):
         raw = (
