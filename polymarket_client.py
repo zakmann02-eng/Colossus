@@ -60,10 +60,6 @@ class PolymarketClient:
             logger.debug("GET %s failed: %s", url, exc)
             return None
 
-    # ---------------------------------------------------------------- #
-    # Market scanning                                                    #
-    # ---------------------------------------------------------------- #
-
     async def get_sports_markets(self, limit=200):
         us_markets = await self._get_us_sdk_markets(limit)
         allowed = [m for m in us_markets if self._is_allowed(m)]
@@ -204,10 +200,6 @@ class PolymarketClient:
                 return False
         return True
 
-    # ---------------------------------------------------------------- #
-    # Price data                                                        #
-    # ---------------------------------------------------------------- #
-
     async def get_price_15min_ago(self, market, token_id):
         now   = int(time.time())
         start = now - 20 * 60
@@ -258,16 +250,13 @@ class PolymarketClient:
         bids = book.get("bids") or []
         asks = book.get("asks") or []
         if not bids or not asks:
+            logger.debug("Empty CLOB book for token %s… — assuming US liquidity", tid[:12])
             return True
         ask_depth = sum(float(a.get("size", 0)) for a in asks[:3])
         bid_depth = sum(float(b.get("size", 0)) for b in bids[:3])
         if ask_depth < min_usd or bid_depth < min_usd:
             return False
         return True
-
-    # ---------------------------------------------------------------- #
-    # Account                                                           #
-    # ---------------------------------------------------------------- #
 
     async def get_balance(self) -> float:
         if not self._us_client:
@@ -311,10 +300,6 @@ class PolymarketClient:
             logger.warning("get_open_positions failed: %s", exc)
             return []
 
-    # ---------------------------------------------------------------- #
-    # Order placement                                                   #
-    # ---------------------------------------------------------------- #
-
     async def place_market_order(
         self, market_slug: str, side: str, price: float, amount_usd: float
     ) -> dict | None:
@@ -351,6 +336,7 @@ class PolymarketClient:
         try:
             resp = self._us_client.orders.create(order)
             logger.info("Order response: %s", resp)
+            # SDK returns None on some success responses (201/204) — treat as filled
             return resp if resp is not None else {"status": "open", "_sdk_returned_none": True}
         except AuthenticationError as exc:
             logger.error("Auth error: %s", exc)
@@ -382,7 +368,6 @@ class PolymarketClient:
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
         quantity = max(1, round(size_usd / price))
-
         for intent in (
             "ORDER_INTENT_SELL_LONG" if side == "YES" else "ORDER_INTENT_SELL_SHORT",
             "ORDER_INTENT_BUY_SHORT" if side == "YES" else "ORDER_INTENT_BUY_LONG",
@@ -411,10 +396,6 @@ class PolymarketClient:
             except Exception as exc:
                 logger.error("Close order error for %s (intent=%s): %s", market_slug, intent, exc)
         return None
-
-    # ---------------------------------------------------------------- #
-    # Helpers                                                           #
-    # ---------------------------------------------------------------- #
 
     def resolve_token_id(self, market, side):
         tokens = market.get("clobTokenIds") or market.get("tokens") or []
@@ -508,6 +489,7 @@ class PolymarketClient:
         if token_id and len(str(token_id)) >= 32 and str(token_id).replace("-", "").isalnum():
             return await self.get_current_price(token_id)
 
+        logger.debug("no-price fields for '%s': marketSides=%r outcomes=%r op=%r", question, sides, outcomes, op)
         return None
 
     def get_market_slug(self, market: dict) -> str:
