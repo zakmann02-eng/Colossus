@@ -3,7 +3,7 @@ Trigger evaluation and trade decision logic.
 
 Pre-filters (all must pass):
   - Price between 0.25 and 0.75 (no extreme underdogs/favorites)
-  - Minimum $500 24h volume
+  - Minimum $100 24h volume
   - Must resolve within 7 days (weekly/daily trading)
 
 Any 1 trigger fires a trade:
@@ -43,17 +43,6 @@ _PERIOD_RE = re.compile(
     r'|\b(first|second|third|fourth)\s*(quarter|half|period)\b'
     r'|\bquarter\b|\bhalftime\b|\bhalf[\s\-]time\b'
     r'|\bperiod\s*\d|\binning\s*\d',
-    re.IGNORECASE,
-)
-
-# Totals (O/U) and spread markets — no moneyline edge, wide variance
-_TOTALS_RE = re.compile(
-    r'\bo/?u\b'                                   # O/U or OU
-    r'|\bover[/\-]?under\b'                        # over/under, over-under
-    r'|\btotal[s]?\b'                              # totals
-    r'|\bspread\b'                                 # spread
-    r'|\([+-]\d+\.?\d*\)'                          # (+1.5) or (-3) spread notation
-    r'|\b[+-]\d+\.5\b',                            # +1.5 / -2.5 alone
     re.IGNORECASE,
 )
 
@@ -156,11 +145,6 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         logger.debug("SKIP period-market: %s", question[:60])
         return None
 
-    # Block totals (O/U) and spread markets — no moneyline edge
-    if _TOTALS_RE.search(question) or _TOTALS_RE.search(market_slug or ""):
-        logger.debug("SKIP totals/spread: %s", question[:60])
-        return None
-
     # Block player prop markets — individual stat lines have no durable edge
     if _PROP_RE.search(question) or _PROP_RE.search(market_slug or ""):
         logger.debug("SKIP player-prop: %s", question[:60])
@@ -198,6 +182,8 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         triggers.append(f"T1:prob={price:.2f}")
 
     # T2: game is currently live (started but not yet resolved)
+    # Replaces the old CLOB-based 15-min price movement check which never
+    # fired for Polymarket.US slug-based tokens.
     game_start_raw = market.get("gameStartTime") or market.get("startTime") or market.get("startDate")
     if game_start_raw:
         start_ts = _parse_ts(game_start_raw)
