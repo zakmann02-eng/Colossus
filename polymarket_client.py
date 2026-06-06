@@ -60,6 +60,10 @@ class PolymarketClient:
             logger.debug("GET %s failed: %s", url, exc)
             return None
 
+    # ---------------------------------------------------------------- #
+    # Market scanning                                                    #
+    # ---------------------------------------------------------------- #
+
     async def get_sports_markets(self, limit=200):
         us_markets = await self._get_us_sdk_markets(limit)
         allowed = [m for m in us_markets if self._is_allowed(m)]
@@ -174,9 +178,11 @@ class PolymarketClient:
 
     def _is_allowed(self, market):
         if not market.get("active", True) or market.get("closed", False):
+            logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
         secs = self.seconds_to_resolution(market)
         if secs is not None and secs <= 0:
+            logger.debug("BLOCKED resolved(%.1fd ago): %s", abs(secs) / 86400, (market.get("question") or "")[:60])
             return False
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
@@ -197,8 +203,13 @@ class PolymarketClient:
         ])
         for kw in _BLOCKED:
             if kw in text:
+                logger.debug("BLOCKED keyword '%s': %s", kw, text[:80])
                 return False
         return True
+
+    # ---------------------------------------------------------------- #
+    # Price data                                                         #
+    # ---------------------------------------------------------------- #
 
     async def get_price_15min_ago(self, market, token_id):
         now   = int(time.time())
@@ -255,8 +266,16 @@ class PolymarketClient:
         ask_depth = sum(float(a.get("size", 0)) for a in asks[:3])
         bid_depth = sum(float(b.get("size", 0)) for b in bids[:3])
         if ask_depth < min_usd or bid_depth < min_usd:
+            logger.debug(
+                "Thin CLOB book for token %s… ask=%.2f bid=%.2f",
+                tid[:12], ask_depth, bid_depth,
+            )
             return False
         return True
+
+    # ---------------------------------------------------------------- #
+    # Account                                                            #
+    # ---------------------------------------------------------------- #
 
     async def get_balance(self) -> float:
         if not self._us_client:
@@ -292,13 +311,15 @@ class PolymarketClient:
                 val = data.get(key)
                 if isinstance(val, list):
                     return val
-                if isinstance(val, dict):
-                    return list(val.values())
             logger.warning("get_open_positions: unrecognised response shape — keys: %s", list(data.keys()) if isinstance(data, dict) else type(data))
             return []
         except Exception as exc:
             logger.warning("get_open_positions failed: %s", exc)
             return []
+
+    # ---------------------------------------------------------------- #
+    # Order placement                                                    #
+    # ---------------------------------------------------------------- #
 
     async def place_market_order(
         self, market_slug: str, side: str, price: float, amount_usd: float
@@ -336,8 +357,7 @@ class PolymarketClient:
         try:
             resp = self._us_client.orders.create(order)
             logger.info("Order response: %s", resp)
-            # SDK returns None on some success responses (201/204) — treat as filled
-            return resp if resp is not None else {"status": "open", "_sdk_returned_none": True}
+            return resp
         except AuthenticationError as exc:
             logger.error("Auth error: %s", exc)
         except BadRequestError as exc:
@@ -368,6 +388,7 @@ class PolymarketClient:
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
         quantity = max(1, round(size_usd / price))
+
         for intent in (
             "ORDER_INTENT_SELL_LONG" if side == "YES" else "ORDER_INTENT_SELL_SHORT",
             "ORDER_INTENT_BUY_SHORT" if side == "YES" else "ORDER_INTENT_BUY_LONG",
@@ -396,6 +417,10 @@ class PolymarketClient:
             except Exception as exc:
                 logger.error("Close order error for %s (intent=%s): %s", market_slug, intent, exc)
         return None
+
+    # ---------------------------------------------------------------- #
+    # Helpers                                                            #
+    # ---------------------------------------------------------------- #
 
     def resolve_token_id(self, market, side):
         tokens = market.get("clobTokenIds") or market.get("tokens") or []
@@ -429,6 +454,7 @@ class PolymarketClient:
                 pass
 
         sides = market.get("marketSides") or []
+        logger.debug("marketSides for '%s': %r", question, sides)
         if sides:
             try:
                 if isinstance(sides, str):
@@ -457,6 +483,7 @@ class PolymarketClient:
                 logger.info("marketSides parse error: %s", exc)
 
         outcomes = market.get("outcomes") or []
+        logger.debug("outcomes for '%s': %r", question, outcomes)
         if outcomes:
             try:
                 if isinstance(outcomes, str):
@@ -493,12 +520,13 @@ class PolymarketClient:
         return None
 
     def get_market_slug(self, market: dict) -> str:
-        return (
-            market.get("slug")
-            or market.get("marketSlug")
-            or market.get("eventSlug")
-            or ""
-        )
+        candidates = [
+            market.get("marketSlug"),
+            market.get("slug"),
+            market.get("eventSlug"),
+        ]
+        slugs = [s for s in candidates if s]
+        return max(slugs, key=len) if slugs else ""
 
     def get_event_date(self, market):
         raw = (
@@ -541,14 +569,9 @@ class PolymarketClient:
         except Exception:
             return None
 
-       def get_market_slug(self, market: dict) -> str:
-        # Prefer the market-level slug (e.g. 'aec-lol-dk-bro-2026-06-06') over the
-        # event slug ('lol-dk-bro-2026-06-06') so it matches the portfolio API exactly.
-        candidates = [
-            market.get("marketSlug"),
-            market.get("slug"),
-            market.get("eventSlug"),
-        ]
-        # Pick the longest non-empty candidate — market slugs are longer than event slugs
-        slugs = [s for s in candidates if s]
-        return max(slugs, key=len) if slugs else ""
+    def market_url(self, market):
+        slug = market.get("slug") or market.get("marketSlug") or ""
+        if slug:
+            return f"https://polymarket.us/event/{slug}"
+        mid = market.get("id") or ""
+        return f"https://polymarket.us/event/{mid}" if mid else "https://polymarket.us"
