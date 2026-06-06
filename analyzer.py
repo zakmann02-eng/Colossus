@@ -33,10 +33,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Intra-game period markets resolve in minutes — no edge, catastrophic SL bleed
+# Intra-game period markets — quarter/half totals & spreads, rarely profitable
 _PERIOD_RE = re.compile(
-    r'\b([1-4][QqHh]|[QqHh][1-4]|1st|2nd|3rd|4th)\b'
-    r'|quarter|halftime|half.time|period\s*\d|inning\s*\d',
+    r'\b[1-4]\s*[Qq]\b'
+    r'|\b[Qq]\s*[1-4]\b'
+    r'|\b[1-4]\s*[Hh]\b'
+    r'|\b[Hh]\s*[1-4]\b'
+    r'|\b(1st|2nd|3rd|4th)\s*(quarter|qtr|half|period)\b'
+    r'|\b(first|second|third|fourth)\s*(quarter|half|period)\b'
+    r'|\bquarter\b|\bhalftime\b|\bhalf[\s\-]time\b'
+    r'|\bperiod\s*\d|\binning\s*\d',
+    re.IGNORECASE,
+)
+
+# Player prop markets — individual stat lines have no team-level edge
+_PROP_RE = re.compile(
+    r'\brebound[s]?\b'
+    r'|\bassist[s]?\b'
+    r'|\bpra\b'
+    r'|\b(rushing|passing|receiving)\s+yard[s]?\b'
+    r'|\breception[s]?\b'
+    r'|\bstrikeout[s]?\b|\bk[s]?\s+prop\b'
+    r'|\bhome[\s\-]?run[s]?\b'
+    r'|\brbi[s]?\b'
+    r'|\bsave[s]?\s+prop\b'
+    r'|\b\d+\+\s*(pts?|points?|reb|rebs?|ast|asts?|yds?)\b'
+    r'|\bover\s+\d+\.5\s+(pts?|points?|reb|rebs?|ast|asts?|yds?)\b'
+    r'|\bplayer\s+prop\b',
     re.IGNORECASE,
 )
 
@@ -122,6 +145,11 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         logger.debug("SKIP period-market: %s", question[:60])
         return None
 
+    # Block player prop markets — individual stat lines have no durable edge
+    if _PROP_RE.search(question) or _PROP_RE.search(market_slug or ""):
+        logger.debug("SKIP player-prop: %s", question[:60])
+        return None
+
     token_id = client.resolve_token_id(market, "YES")
     if not token_id:
         logger.debug("SKIP no-token: %s", question[:60])
@@ -149,25 +177,21 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     triggers: list[str] = []
     now = time.time()
 
-    # T1: price near 50/50 — genuinely contested market
     if T1_LOW <= price <= T1_HIGH:
         triggers.append(f"T1:prob={price:.2f}")
 
-    # T2: game is currently live (started but not yet resolved)
     game_start_raw = market.get("gameStartTime") or market.get("startTime") or market.get("startDate")
     if game_start_raw:
         start_ts = _parse_ts(game_start_raw)
         if 0 < start_ts < now:
             triggers.append("T2:live")
 
-    # T3: 24h volume is unusually high relative to historical daily average
     vol_all   = _safe_float(market.get("volume") or market.get("volumeNum"))
     days_est  = max(1.0, _safe_float(market.get("daysAgo"), 7.0))
     daily_avg = vol_all / days_est if vol_all else 0
     if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
 
-    # T4: resolves within 48h — imminent outcome, tighter edge window
     if secs is not None and 0 < secs <= T4_SECS:
         triggers.append(f"T4:hrs={secs/3600:.0f}h")
 
