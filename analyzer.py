@@ -2,7 +2,7 @@
 Trigger evaluation and trade decision logic.
 
 Pre-filters (all must pass):
-  - Price between 0.25 and 0.75 (no extreme underdogs/favorites)
+  - Price between 0.25 and 0.75 (no extreme underdogs)
   - Minimum $100 24h volume
   - Must resolve within 7 days (weekly/daily trading)
 
@@ -13,9 +13,9 @@ Any 1 trigger fires a trade:
   T4  Resolves within 48h (imminent resolution — tight time window)
 
 Position sizing by triggers fired:
-  1 trigger  → LOW  → $0.10–$0.35  · TP 20% · SL 5%
-  2 triggers → MED  → $0.35–$0.65  · TP 25% · SL 8%
-  3+ triggers→ HIGH → $0.65–$1.00  · TP 30% · SL 10%
+  1 trigger  → LOW  → $0.10–$0.35  · TP 15% · SL 5%
+  2 triggers → MED  → $0.35–$0.65  · TP 20% · SL 8%
+  3+ triggers→ HIGH → $0.65–$1.00  · TP 25% · SL 10%
 """
 
 from __future__ import annotations
@@ -40,12 +40,12 @@ MAX_DAYS_OUT = 7 * 86_400
 T1_LOW  = 0.40
 T1_HIGH = 0.60
 T3_MULT = 1.5
-T4_SECS = 2 * 86_400   # tightened: 48h (was 7 days — always fired, added no signal)
+T4_SECS = 2 * 86_400
 
 _TIERS = {
-    1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, "tp": 0.20, "sl": 0.05},
-    2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.25, "sl": 0.08},
-    3: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.30, "sl": 0.10},
+    1: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, "tp": 0.15, "sl": 0.05},
+    2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.20, "sl": 0.08},
+    3: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.25, "sl": 0.10},
 }
 
 
@@ -89,16 +89,12 @@ def _parse_ts(raw) -> float:
 
 
 def _decide_side(price: float, market: dict | None = None) -> str:
-    # For near-50/50 markets use momentum: if price has been moving up (best ask
-    # rising), lean YES; if falling, lean NO. Fall back to slight favorite side
-    # (above 0.50 → YES is already the favorite, follow it).
     if market:
         best_ask = _safe_float(market.get("bestAsk") or market.get("bestAskPrice"))
         best_bid = _safe_float(market.get("bestBid") or market.get("bestBidPrice"))
         if best_ask > 0 and best_bid > 0:
             mid = (best_ask + best_bid) / 2
             return "YES" if mid >= 0.50 else "NO"
-    # Default: follow the favorite (majority is right more often than not)
     return "YES" if price >= 0.50 else "NO"
 
 
@@ -140,25 +136,21 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     triggers: list[str] = []
     now = time.time()
 
-    # T1: price near 50/50 — genuinely contested market
     if T1_LOW <= price <= T1_HIGH:
         triggers.append(f"T1:prob={price:.2f}")
 
-    # T2: game is currently live (started but not yet resolved)
     game_start_raw = market.get("gameStartTime") or market.get("startTime") or market.get("startDate")
     if game_start_raw:
         start_ts = _parse_ts(game_start_raw)
         if 0 < start_ts < now:
             triggers.append("T2:live")
 
-    # T3: 24h volume is unusually high relative to historical daily average
     vol_all   = _safe_float(market.get("volume") or market.get("volumeNum"))
     days_est  = max(1.0, _safe_float(market.get("daysAgo"), 7.0))
     daily_avg = vol_all / days_est if vol_all else 0
     if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
 
-    # T4: resolves within 48h — imminent outcome, tighter edge window
     if secs is not None and 0 < secs <= T4_SECS:
         triggers.append(f"T4:hrs={secs/3600:.0f}h")
 
