@@ -3,7 +3,7 @@ Trigger evaluation and trade decision logic.
 
 Pre-filters (all must pass):
   - Price between 0.25 and 0.75 (no extreme underdogs/favorites)
-  - Minimum $100 24h volume
+  - Minimum $500 24h volume
   - Must resolve within 7 days (weekly/daily trading)
 
 Any 1 trigger fires a trade:
