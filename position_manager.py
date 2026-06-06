@@ -13,15 +13,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Use /data volume if available (Railway persistent volume), else fall back to app dir
-_DATA_DIR     = "/data" if os.path.isdir("/data") else os.path.dirname(__file__)
-_PERSIST_FILE = os.path.join(_DATA_DIR, "positions.json")
-_RESERVE_FILE = os.path.join(_DATA_DIR, "reserve.json")
+_PERSIST_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
+_RESERVE_FILE = os.path.join(os.path.dirname(__file__), "reserve.json")
 
 PROFIT_RESERVE_PCT = 0.30  # 30% of each TP profit locked away
 
 
-_PRICE_MISS_LIMIT = 3  # force-close after this many consecutive price misses (~3 min)
+_PRICE_MISS_LIMIT = 5  # force-close after this many consecutive price misses
 
 @dataclass
 class _Entry:
@@ -176,10 +174,11 @@ class PositionManager:
             price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
             cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
             size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
-            if price <= 0:
+            if price <= 0 or size_usd <= 0:
                 continue
-            # Register even near-zero value positions so /sellall can close them
-            token_id = f"sync_{slug}_{side}"
+            # Prefer a real CLOB token_id so get_current_price() works directly
+            real_tid = self._client.get_token_id_for_slug(slug, side)
+            token_id = real_tid or f"sync_{slug}_{side}"
             self._entries[token_id] = _Entry(
                 market_slug = slug,
                 side        = side,
@@ -229,19 +228,6 @@ class PositionManager:
     def has_position(self, market_slug: str) -> bool:
         return any(e.market_slug == market_slug for e in self._entries.values())
 
-    @staticmethod
-    def _slug_match(stored: str, api_slug: str) -> bool:
-        """Fuzzy match slugs.
-
-        The scan API returns event slugs (e.g. 'lol-dk-bro-2026-06-06') while
-        the portfolio API returns market slugs with a prefix (e.g. 'aec-lol-dk-bro-2026-06-06').
-        Substring check handles both directions.
-        """
-        if not stored or not api_slug:
-            return False
-        s, a = stored.lower().strip("-"), api_slug.lower().strip("-")
-        return s == a or a.startswith(s) or s.startswith(a) or s in a or a in s
-
     async def _get_price_for_entry(self, token_id: str, entry: "_Entry") -> float | None:
         tid = str(token_id)
         is_clob_token = (
@@ -256,52 +242,40 @@ class PositionManager:
 
         try:
             positions = await self._client.get_open_positions()
-            all_slugs: list[str] = []
             for p in (positions or []):
                 if not isinstance(p, dict):
                     continue
                 meta = p.get("marketMetadata") or {}
                 slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
-                all_slugs.append(slug)
-                if not self._slug_match(entry.market_slug, slug):
+                if slug != entry.market_slug:
                     continue
-
-                # 1. percentPnl — most reliably populated by Polymarket.US
+                cash = p.get("cashValue") or p.get("currentValue") or p.get("value") or {}
+                curr_val = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
+                net_pos = abs(float(p.get("netPosition") or p.get("netPositionDecimal") or 0))
+                if curr_val > 0 and net_pos > 0:
+                    return curr_val / net_pos
+                cps = p.get("costPerShare") or {}
+                cps_val = float(cps.get("value") if isinstance(cps, dict) else cps or 0)
+                if 0 < cps_val <= 1:
+                    return cps_val
                 raw_pnl = p.get("percentPnl") or p.get("unrealizedPnlPercent") or p.get("pnlPercent")
                 if raw_pnl is not None and entry.price > 0:
                     try:
                         pnl = float(raw_pnl)
                         if abs(pnl) > 1:
                             pnl /= 100
-                        return round(entry.price * (1 + pnl), 4)
+                        return entry.price * (1 + pnl)
                     except (TypeError, ValueError):
                         pass
-
-                # 2. cashValue / netPosition
-                cash = p.get("cashValue") or p.get("currentValue") or p.get("value") or {}
-                curr_val = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
-                net_pos = abs(float(p.get("netPosition") or p.get("netPositionDecimal") or 0))
-                if curr_val > 0 and net_pos > 0:
-                    return round(curr_val / net_pos, 4)
-
-                # 3. costPerShare
-                cps = p.get("costPerShare") or {}
-                cps_val = float(cps.get("value") if isinstance(cps, dict) else cps or 0)
-                if 0 < cps_val <= 1:
-                    return cps_val
-
-                logger.warning("Matched slug for %s but could not extract price — keys: %s",
-                               entry.market_slug, list(p.keys()))
-                return None
-
-            # No slug matched — log what we actually got so we can diagnose
-            logger.warning("No slug match for '%s' — API returned slugs: %s",
-                           entry.market_slug, all_slugs[:10])
+                logger.info("Cannot resolve current price for %s — raw position: %s",
+                            entry.market_slug, p)
         except Exception as exc:
             logger.warning("Portfolio price lookup failed for %s: %s", entry.market_slug, exc)
         return None
 
     async def check_positions(self) -> None:
+        # Pick up any positions that appeared since last cycle (manual or missed on startup)
+        await self.sync_from_exchange()
         if not self._entries:
             logger.debug("No tracked positions — skipping TP/SL check")
             return
