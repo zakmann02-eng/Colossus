@@ -23,9 +23,7 @@ _BLOCKED = {
     "trump", "harris", "biden", "democrat", "republican",
     "war", "conflict", "invasion", "missile", "nato",
     "fed rate", "interest rate", "inflation", "gdp",
-    "cpi", "consumer price", "pce", "unemployment", "payroll", "fomc",
     "oscar", "grammy", "emmy", "celebrity", "reality tv",
-    "crypto", "bitcoin", "ethereum", "btc", "eth",
 }
 
 
@@ -35,9 +33,10 @@ class PolymarketClient:
         self._key_id     = key_id.strip()
         self._secret_key = secret_key.strip()
         self._us_client  = self._init_us_client()
-self._last_markets: list = []   # updated every scan; used by get_token_id_for_slug
+        self._market_cache: dict = {}
         self._slug_map: dict[str, str] = {}
-        self._upcoming_offset: int = 0
+        self._upcoming_offset: int = 0  # cached after first scan finds upcoming games
+        self._last_markets: list = []   # updated every scan; used by get_token_id_for_slug
         logger.info("PolymarketClient ready — key_id %s…", self._key_id[:8])
 
     def _init_us_client(self):
@@ -63,10 +62,10 @@ self._last_markets: list = []   # updated every scan; used by get_token_id_for_s
             return None
 
     # ---------------------------------------------------------------- #
-    # Market scanning                                                    #
+    # Market scanning — SDK first, Gamma fallback                       #
     # ---------------------------------------------------------------- #
 
-        async def get_sports_markets(self, limit=200):
+    async def get_sports_markets(self, limit=200):
         us_markets = await self._get_us_sdk_markets(limit)
         if us_markets:
             self._last_markets = us_markets  # cache for slug→token_id lookups
@@ -82,6 +81,10 @@ self._last_markets: list = []   # updated every scan; used by get_token_id_for_s
                 if tid:
                     return tid
         return None
+
+    async def _get_us_sdk_markets(self, limit=200) -> list[dict]:
+        if not self._us_client:
+            return []
         loop = asyncio.get_event_loop()
 
         def _build_markets(events):
@@ -114,6 +117,7 @@ self._last_markets: list = []   # updated every scan; used by get_token_id_for_s
             ) if data else []
 
         def _parse_ts(raw) -> float:
+            """Parse timestamp. Date-only strings (YYYY-MM-DD) are treated as end-of-day UTC."""
             if raw is None:
                 return 0.0
             try:
@@ -187,445 +191,15 @@ self._last_markets: list = []   # updated every scan; used by get_token_id_for_s
 
     def _is_allowed(self, market):
         if not market.get("active", True) or market.get("closed", False):
+            logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
         secs = self.seconds_to_resolution(market)
         if secs is not None and secs <= 0:
+            logger.debug("BLOCKED resolved(%.1fd ago): %s", abs(secs) / 86400, (market.get("question") or "")[:60])
             return False
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
             event_state = str(event_state_raw.get("status") or event_state_raw.get("state") or "").upper()
         else:
             event_state = str(event_state_raw or "").upper()
-        if event_state in ("FINAL", "COMPLETED", "POST_GAME", "POSTGAME", "ENDED", "RESOLVED"):
-            return False
-        text = " ".join([
-            (market.get("question") or "").lower(),
-            (market.get("title") or "").lower(),
-            (market.get("category") or "").lower(),
-            " ".join(
-                t.lower() if isinstance(t, str)
-                else (t.get("label") or t.get("name") or "").lower()
-                for t in (market.get("tags") or [])
-            ),
-        ])
-        for kw in _BLOCKED:
-            if kw in text:
-                logger.debug("BLOCKED keyword '%s': %s", kw, text[:80])
-                return False
-        return True
-
-    # ---------------------------------------------------------------- #
-    # Price data                                                        #
-    # ---------------------------------------------------------------- #
-
-    async def get_price_15min_ago(self, market, token_id):
-        now   = int(time.time())
-        start = now - 20 * 60
-        data  = await self._get(
-            f"{CLOB_API}/prices-history",
-            params={"tokenId": token_id, "startTs": start, "endTs": now, "fidelity": 1},
-        )
-        if not data:
-            data = await self._get(
-                f"{CLOB_API}/prices-history",
-                params={"market": market.get("id", ""), "startTs": start, "endTs": now, "fidelity": 1},
-            )
-        history = (data or {}).get("history") or (data if isinstance(data, list) else [])
-        if not history:
-            return None
-        try:
-            return float(history[0].get("p") or history[0].get("price") or 0)
-        except Exception:
-            return None
-
-    async def get_current_price(self, token_id):
-        data = await self._get(f"{CLOB_API}/last-trade-price", params={"token_id": token_id})
-        if data:
-            try:
-                return float(data.get("price") or 0) or None
-            except Exception:
-                pass
-        book = await self._get(f"{CLOB_API}/book", params={"token_id": token_id})
-        if book:
-            try:
-                bids     = book.get("bids") or []
-                asks     = book.get("asks") or []
-                best_bid = float(bids[0]["price"]) if bids else 0
-                best_ask = float(asks[0]["price"]) if asks else 0
-                if best_bid and best_ask:
-                    return (best_bid + best_ask) / 2
-            except Exception:
-                pass
-        return None
-
-    async def has_liquidity(self, token_id: str, min_usd: float = 0.10) -> bool:
-        tid = str(token_id)
-        if len(tid) < 32 or not tid.replace("-", "").isalnum():
-            return True
-        book = await self._get(f"{CLOB_API}/book", params={"token_id": token_id})
-        if not book:
-            return True
-        bids = book.get("bids") or []
-        asks = book.get("asks") or []
-        if not bids or not asks:
-            logger.debug("Empty CLOB book for token %s… — assuming US liquidity", tid[:12])
-            return True
-        ask_depth = sum(float(a.get("size", 0)) for a in asks[:3])
-        bid_depth = sum(float(b.get("size", 0)) for b in bids[:3])
-        if ask_depth < min_usd or bid_depth < min_usd:
-            logger.debug("Thin CLOB book for token %s… ask=%.2f bid=%.2f",
-                         tid[:12], ask_depth, bid_depth)
-            return False
-        return True
-
-    # ---------------------------------------------------------------- #
-    # Account                                                           #
-    # ---------------------------------------------------------------- #
-
-    async def get_balance(self) -> float:
-        if not self._us_client:
-            return 999.0
-        loop = asyncio.get_event_loop()
-        try:
-            data = await loop.run_in_executor(None, self._us_client.account.balances)
-            logger.info("Balance response: %s", data)
-            if isinstance(data, dict):
-                balances = data.get("balances")
-                if balances and isinstance(balances, list):
-                    b = balances[0]
-                    val = b.get("buyingPower") or b.get("currentBalance") or 0
-                    return float(val)
-                val = data.get("cash") or data.get("balance") or data.get("availableBalance") or 0
-                return float(val)
-            return 999.0
-        except Exception as exc:
-            logger.warning("get_balance failed: %s — assuming funds available", exc)
-            return 999.0
-
-    async def get_open_positions(self):
-        if not self._us_client:
-            return []
-        loop = asyncio.get_event_loop()
-        try:
-            data = await loop.run_in_executor(None, self._us_client.portfolio.positions)
-            if not data:
-                return []
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict):
-                # API returns {"positions": null, "nextCursor": ..., "eof": true}
-                # when there are no open positions — treat null/missing as empty list
-                for key in ("positions", "data", "items", "portfolio", "results"):
-                    if key not in data:
-                        continue
-                    val = data[key]
-                    if isinstance(val, list):
-                        return val
-                    # key present but null → no positions
-                    return []
-            logger.warning("get_open_positions: unexpected type %s", type(data))
-            return []
-        except Exception as exc:
-            logger.warning("get_open_positions failed: %s", exc)
-            return []
-
-    # ---------------------------------------------------------------- #
-    # Order placement                                                   #
-    # ---------------------------------------------------------------- #
-
-    async def place_market_order(
-        self, market_slug: str, side: str, price: float, amount_usd: float
-    ) -> dict | None:
-        if not self._us_client:
-            logger.error("Polymarket.US client not initialised — cannot place order")
-            return None
-        if not market_slug:
-            logger.error("No market slug — cannot place order")
-            return None
-        loop = asyncio.get_event_loop()
-        try:
-            return await loop.run_in_executor(
-                None, self._sync_place_order, market_slug, side, price, amount_usd
-            )
-        except Exception as exc:
-            logger.error("Order placement failed: %s", exc)
-            return None
-
-    def _sync_place_order(
-        self, market_slug: str, side: str, price: float, amount_usd: float
-    ) -> dict | None:
-        from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
-        intent = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
-        # 3-cent buffer makes the order more attractive in the book → faster fills
-        if side == "YES":
-            order_price = round(min(price + 0.03, 0.97), 4)
-        else:
-            order_price = round(max(price - 0.03, 0.03), 4)
-        quantity = max(1, round(amount_usd / order_price))
-        order = {
-            "marketSlug": market_slug,
-            "intent":     intent,
-            "type":       "ORDER_TYPE_LIMIT",
-            "price":      {"value": str(order_price), "currency": "USD"},
-            "quantity":   quantity,
-            "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
-        }
-        logger.info("Placing order: %s", order)
-        try:
-            resp = self._us_client.orders.create(order)
-            logger.info("Order response: %s", resp)
-            return resp
-        except AuthenticationError as exc:
-            logger.error("Auth error: %s", exc)
-        except BadRequestError as exc:
-            logger.error("Bad request: %s", exc)
-        except NotFoundError as exc:
-            logger.error("Market not found (%s): %s", market_slug, exc)
-        except Exception as exc:
-            logger.error("Order error: %s", exc)
-        return None
-
-    async def get_order_status(self, order_id: str) -> dict | None:
-        if not self._us_client or not order_id:
-            return None
-        loop = asyncio.get_event_loop()
-        try:
-            orders_api = getattr(self._us_client, "orders", None)
-            if orders_api is None:
-                return None
-            getter = getattr(orders_api, "get", None) or getattr(orders_api, "retrieve", None)
-            if getter is None:
-                logger.warning("SDK has no orders.get/retrieve — cannot poll order status")
-                return None
-            return await loop.run_in_executor(None, lambda: getter(order_id))
-        except Exception as exc:
-            logger.warning("get_order_status(%s) failed: %s", order_id[:8], exc)
-            return None
-
-    async def cancel_order(self, order_id: str) -> bool:
-        if not self._us_client or not order_id:
-            return False
-        loop = asyncio.get_event_loop()
-        try:
-            orders_api = getattr(self._us_client, "orders", None)
-            if orders_api is None:
-                return False
-            canceller = getattr(orders_api, "cancel", None) or getattr(orders_api, "delete", None)
-            if canceller is None:
-                logger.warning("SDK has no orders.cancel/delete — cannot cancel order")
-                return False
-            await loop.run_in_executor(None, lambda: canceller(order_id))
-            logger.info("Cancelled order %s…", order_id[:16])
-            return True
-        except Exception as exc:
-            logger.warning("cancel_order(%s) failed: %s", order_id[:8], exc)
-            return False
-
-    async def close_position(
-        self, market_slug: str, side: str, price: float, size_usd: float
-    ) -> dict | None:
-        if not self._us_client:
-            logger.error("Polymarket.US client not initialised — cannot close position")
-            return None
-        loop = asyncio.get_event_loop()
-        try:
-            return await loop.run_in_executor(
-                None, self._sync_close_position, market_slug, side, price, size_usd
-            )
-        except Exception as exc:
-            logger.error("close_position failed for %s: %s", market_slug, exc)
-            return None
-
-    def _sync_close_position(
-        self, market_slug: str, side: str, price: float, size_usd: float
-    ) -> dict | None:
-        from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
-        quantity = max(1, round(size_usd / price))
-
-        for intent in (
-            "ORDER_INTENT_SELL_LONG" if side == "YES" else "ORDER_INTENT_SELL_SHORT",
-            "ORDER_INTENT_BUY_SHORT" if side == "YES" else "ORDER_INTENT_BUY_LONG",
-        ):
-            order = {
-                "marketSlug": market_slug,
-                "intent":     intent,
-                "type":       "ORDER_TYPE_LIMIT",
-                "price":      {"value": str(round(price, 4)), "currency": "USD"},
-                "quantity":   quantity,
-                "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
-            }
-            logger.info("Closing position (intent=%s): %s", intent, order)
-            try:
-                resp = self._us_client.orders.create(order)
-                logger.info("Close response: %s", resp)
-                return resp
-            except BadRequestError as exc:
-                logger.warning("Close intent %s rejected for %s: %s — trying fallback",
-                               intent, market_slug, exc)
-            except AuthenticationError as exc:
-                logger.error("Auth error closing %s: %s", market_slug, exc)
-                return None
-            except NotFoundError as exc:
-                logger.error("Market not found closing %s: %s", market_slug, exc)
-                return None
-            except Exception as exc:
-                logger.error("Close order error for %s (intent=%s): %s", market_slug, intent, exc)
-        return None
-
-    # ---------------------------------------------------------------- #
-    # Helpers                                                           #
-    # ---------------------------------------------------------------- #
-
-    def resolve_token_id(self, market, side):
-        tokens = market.get("clobTokenIds") or market.get("tokens") or []
-        if isinstance(tokens, str):
-            try:
-                tokens = json.loads(tokens)
-            except Exception:
-                tokens = []
-        if tokens:
-            idx = 0 if side == "YES" else 1
-            tok = tokens[idx] if idx < len(tokens) else tokens[0]
-            if isinstance(tok, dict):
-                return tok.get("token_id") or tok.get("id")
-            return str(tok)
-        return (
-            market.get("conditionId") or market.get("id")
-            or market.get("slug") or market.get("eventSlug") or None
-        )
-
-    async def get_market_price(self, market: dict, token_id: str) -> float | None:
-        question = (market.get("question") or "")[:40]
-
-        op = market.get("outcomePrices")
-        if op:
-            try:
-                prices = json.loads(op) if isinstance(op, str) else op
-                p = float(prices[0])
-                if 0 < p < 1:
-                    return p
-            except Exception:
-                pass
-
-        sides = market.get("marketSides") or []
-        logger.debug("marketSides for '%s': %r", question, sides)
-        if sides:
-            try:
-                if isinstance(sides, str):
-                    sides = json.loads(sides)
-                for s in sides:
-                    if isinstance(s, dict):
-                        if str(s.get("side") or s.get("outcome") or "").upper() in ("YES", "LONG", "0"):
-                            for k in ("price", "probability", "lastPrice", "bestAsk", "bestBid"):
-                                raw = s.get(k)
-                                if raw is not None:
-                                    p = float(raw)
-                                    if 0 < p < 1:
-                                        return p
-                for s in sides:
-                    if isinstance(s, dict):
-                        for k in ("price", "probability", "lastPrice", "bestAsk", "bestBid"):
-                            raw = s.get(k)
-                            if raw is not None:
-                                try:
-                                    p = float(raw)
-                                    if 0 < p < 1:
-                                        return p
-                                except Exception:
-                                    pass
-            except Exception as exc:
-                logger.info("marketSides parse error: %s", exc)
-
-        outcomes = market.get("outcomes") or []
-        logger.debug("outcomes for '%s': %r", question, outcomes)
-        if outcomes:
-            try:
-                if isinstance(outcomes, str):
-                    outcomes = json.loads(outcomes)
-                items = outcomes if isinstance(outcomes, list) else list(outcomes.values())
-                for item in items:
-                    if isinstance(item, dict):
-                        for k in ("price", "probability", "lastPrice"):
-                            raw = item.get(k)
-                            if raw is not None:
-                                try:
-                                    p = float(raw)
-                                    if 0 < p < 1:
-                                        return p
-                                except Exception:
-                                    pass
-            except Exception as exc:
-                logger.info("outcomes parse error: %s", exc)
-
-        for field in ("lastTradePrice", "price", "bestBid"):
-            raw = market.get(field)
-            if raw:
-                try:
-                    p = float(raw)
-                    if 0 < p < 1:
-                        return p
-                except Exception:
-                    pass
-
-        if token_id and len(str(token_id)) >= 32 and str(token_id).replace("-", "").isalnum():
-            return await self.get_current_price(token_id)
-
-        logger.debug("no-price fields for '%s': marketSides=%r outcomes=%r op=%r",
-                     question, sides, outcomes, op)
-        return None
-
-    def get_market_slug(self, market: dict) -> str:
-        return (
-            market.get("slug")
-            or market.get("marketSlug")
-            or market.get("eventSlug")
-            or ""
-        )
-
-    def get_event_date(self, market):
-        raw = (
-            market.get("resolutionTime") or market.get("endDate")
-            or market.get("startDate") or market.get("endDateIso") or ""
-        )
-        if not raw:
-            return "N/A"
-        try:
-            if isinstance(raw, (int, float)):
-                dt = datetime.fromtimestamp(float(raw), tz=timezone.utc)
-            else:
-                dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-            return dt.strftime("%b %d, %Y")
-        except Exception:
-            return str(raw)[:10] or "N/A"
-
-    def seconds_to_resolution(self, market):
-        raw = market.get("resolutionTime") or market.get("closeTime")
-        if not raw:
-            raw = market.get("gameStartTime")
-            if not raw:
-                return None
-            try:
-                game_ts = (float(raw) if isinstance(raw, (int, float))
-                           else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp())
-                return (game_ts + 4 * 3600) - time.time()
-            except Exception:
-                return None
-        try:
-            if isinstance(raw, (int, float)):
-                end_ts = float(raw)
-            else:
-                s = str(raw).strip()
-                if "T" in s or len(s) > 10:
-                    end_ts = datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
-                else:
-                    end_ts = datetime.fromisoformat(s + "T23:59:59+00:00").timestamp()
-            return end_ts - time.time()
-        except Exception:
-            return None
-
-    def market_url(self, market):
-        slug = market.get("slug") or market.get("marketSlug") or ""
-        if slug:
-            return f"https://polymarket.us/event/{slug}"
-        mid = market.get("id") or ""
-        return f"https://polymarket.us/event/{mid}" if mid else "https://polymarket.us"
+        if event_state in ("FINAL
