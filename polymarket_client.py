@@ -368,13 +368,20 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, amount_usd: float
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
-        intent   = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
-        quantity = max(1, round(amount_usd / price))
+        intent = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
+        # Add 2-cent buffer to cross the spread and get immediate fills.
+        # For YES: pay slightly more. For NO (BUY_SHORT): accept slightly lower YES price
+        # (equivalent to paying slightly more for NO).
+        if side == "YES":
+            order_price = round(min(price + 0.02, 0.97), 4)
+        else:
+            order_price = round(max(price - 0.02, 0.03), 4)
+        quantity = max(1, round(amount_usd / order_price))
         order = {
             "marketSlug": market_slug,
             "intent":     intent,
             "type":       "ORDER_TYPE_LIMIT",
-            "price":      {"value": str(round(price, 4)), "currency": "USD"},
+            "price":      {"value": str(order_price), "currency": "USD"},
             "quantity":   quantity,
             "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
         }
