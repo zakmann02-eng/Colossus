@@ -238,6 +238,7 @@ class PositionManager:
             return False
         s, a = stored.lower().strip("-"), api_slug.lower().strip("-")
         return s == a or a.startswith(s) or s.startswith(a) or s in a or a in s
+
     async def _get_price_for_entry(self, token_id: str, entry: "_Entry") -> float | None:
         tid = str(token_id)
         is_clob_token = (
