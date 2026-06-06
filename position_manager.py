@@ -18,8 +18,8 @@ _RESERVE_FILE = os.path.join(os.path.dirname(__file__), "reserve.json")
 
 PROFIT_RESERVE_PCT = 0.30  # 30% of each TP profit locked away
 
-_PRICE_MISS_LIMIT = 5  # force-close after this many consecutive price misses
 
+_PRICE_MISS_LIMIT = 3  # force-close after this many consecutive price misses (~3 min)
 
 @dataclass
 class _Entry:
@@ -29,7 +29,7 @@ class _Entry:
     tp:           float
     sl:           float
     amount_usd:   float = 0.50
-    price_misses: int   = 0
+    price_misses: int   = 0  # consecutive cycles where price lookup returned None
 
 
 class PositionManager:
@@ -48,8 +48,10 @@ class PositionManager:
         self._default_sl = default_sl
         self._entries: dict[str, _Entry] = {}
 
+        # Profit reserve — persisted across restarts
         self._reserve_usd: float = 0.0
 
+        # Daily stats — reset at midnight UTC by send_daily_report()
         self._day_opened:   int   = 0
         self._day_tp:       int   = 0
         self._day_sl:       int   = 0
@@ -110,6 +112,7 @@ class PositionManager:
         self._day_opened += 1
 
     async def send_daily_report(self) -> None:
+        """Send end-of-day P&L report to Telegram and reset daily counters."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         total_closed = self._day_tp + self._day_sl
         win_rate = f"{self._day_tp / total_closed:.0%}" if total_closed > 0 else "N/A"
@@ -135,6 +138,7 @@ class PositionManager:
         except Exception as exc:
             logger.error("Failed to send daily report: %s", exc)
 
+        # Reset daily counters
         self._day_opened   = 0
         self._day_tp       = 0
         self._day_sl       = 0
@@ -222,6 +226,14 @@ class PositionManager:
     def has_position(self, market_slug: str) -> bool:
         return any(e.market_slug == market_slug for e in self._entries.values())
 
+    @staticmethod
+    def _slug_match(stored: str, api_slug: str) -> bool:
+        """Fuzzy match — handles trailing suffixes the exchange appends to slugs."""
+        if not stored or not api_slug:
+            return False
+        s, a = stored.lower().strip("-"), api_slug.lower().strip("-")
+        return s == a or a.startswith(s) or s.startswith(a)
+
     async def _get_price_for_entry(self, token_id: str, entry: "_Entry") -> float | None:
         tid = str(token_id)
         is_clob_token = (
@@ -236,33 +248,47 @@ class PositionManager:
 
         try:
             positions = await self._client.get_open_positions()
+            all_slugs: list[str] = []
             for p in (positions or []):
                 if not isinstance(p, dict):
                     continue
                 meta = p.get("marketMetadata") or {}
                 slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
-                if slug != entry.market_slug:
+                all_slugs.append(slug)
+                if not self._slug_match(entry.market_slug, slug):
                     continue
-                cash = p.get("cashValue") or p.get("currentValue") or p.get("value") or {}
-                curr_val = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
-                net_pos = abs(float(p.get("netPosition") or p.get("netPositionDecimal") or 0))
-                if curr_val > 0 and net_pos > 0:
-                    return curr_val / net_pos
-                cps = p.get("costPerShare") or {}
-                cps_val = float(cps.get("value") if isinstance(cps, dict) else cps or 0)
-                if 0 < cps_val <= 1:
-                    return cps_val
+
+                # 1. percentPnl — most reliably populated by Polymarket.US
                 raw_pnl = p.get("percentPnl") or p.get("unrealizedPnlPercent") or p.get("pnlPercent")
                 if raw_pnl is not None and entry.price > 0:
                     try:
                         pnl = float(raw_pnl)
                         if abs(pnl) > 1:
                             pnl /= 100
-                        return entry.price * (1 + pnl)
+                        return round(entry.price * (1 + pnl), 4)
                     except (TypeError, ValueError):
                         pass
-                logger.info("Cannot resolve current price for %s — raw position: %s",
-                            entry.market_slug, p)
+
+                # 2. cashValue / netPosition
+                cash = p.get("cashValue") or p.get("currentValue") or p.get("value") or {}
+                curr_val = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
+                net_pos = abs(float(p.get("netPosition") or p.get("netPositionDecimal") or 0))
+                if curr_val > 0 and net_pos > 0:
+                    return round(curr_val / net_pos, 4)
+
+                # 3. costPerShare
+                cps = p.get("costPerShare") or {}
+                cps_val = float(cps.get("value") if isinstance(cps, dict) else cps or 0)
+                if 0 < cps_val <= 1:
+                    return cps_val
+
+                logger.warning("Matched slug for %s but could not extract price — keys: %s",
+                               entry.market_slug, list(p.keys()))
+                return None
+
+            # No slug matched — log what we actually got so we can diagnose
+            logger.warning("No slug match for '%s' — API returned slugs: %s",
+                           entry.market_slug, all_slugs[:10])
         except Exception as exc:
             logger.warning("Portfolio price lookup failed for %s: %s", entry.market_slug, exc)
         return None
@@ -409,11 +435,12 @@ class PositionManager:
         self._save()
 
         pnl = (current_price - entry.price) / entry.price if entry.price else 0
-        pnl_usd = entry.amount_usd * pnl
+        pnl_usd = entry.amount_usd * pnl  # signed
         is_tp = "TP" in reason
         is_manual = "Manual" in reason
         emoji = "✅" if is_tp else ("🏳️" if is_manual else "🔴")
 
+        # 30% profit preservation on TP exits
         reserved_now = 0.0
         if is_tp and pnl_usd > 0:
             reserved_now = round(pnl_usd * PROFIT_RESERVE_PCT, 4)
@@ -421,6 +448,7 @@ class PositionManager:
             self._save_reserve()
             self._day_reserved += reserved_now
 
+        # Daily stats
         self._day_pnl += pnl_usd
         if is_tp:
             self._day_tp += 1
