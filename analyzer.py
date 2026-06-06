@@ -182,8 +182,6 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         triggers.append(f"T1:prob={price:.2f}")
 
     # T2: game is currently live (started but not yet resolved)
-    # Replaces the old CLOB-based 15-min price movement check which never
-    # fired for Polymarket.US slug-based tokens.
     game_start_raw = market.get("gameStartTime") or market.get("startTime") or market.get("startDate")
     if game_start_raw:
         start_ts = _parse_ts(game_start_raw)
