@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 _BASE = "https://api.the-odds-api.com/v4"
-MIN_EDGE = 0.07   # minimum 7% gap between bookmaker prob and Polymarket price
+MIN_EDGE = 0.05   # minimum 5% gap between bookmaker prob and Polymarket price
 
 # 12-hour cache per sport key — with more sports, keeps us under 500 req/month free tier
 _CACHE: dict[str, tuple[float, list]] = {}
