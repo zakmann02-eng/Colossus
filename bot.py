@@ -121,7 +121,6 @@ async def _scan_markets_inner(
             return
 
     logger.info("Scanning markets…")
-    # Re-sync open positions before scanning so has_position() blocks re-trades after redeployments
     await position_mgr.sync_from_exchange()
     balance = await client.get_balance()
     available = max(0.0, balance - position_mgr.reserve_usd)
@@ -196,8 +195,14 @@ async def _scan_markets_inner(
 
         logger.info("Order raw response: %s", resp)
         order_status = (resp or {}).get("status", "") if isinstance(resp, dict) else ""
-        filled = order_status in ("matched", "filled", "MATCHED", "FILLED", "open", "OPEN") or (resp and not isinstance(resp, dict))
-        status = "✅ filled" if filled else f"⚠️ not filled ({order_status or 'no response'})"
+        order_id     = (resp or {}).get("id", "") if isinstance(resp, dict) else ""
+        placed = resp is not None
+        if not placed:
+            status = "⚠️ no response — order may not have been placed"
+        elif order_status in ("matched", "filled", "MATCHED", "FILLED"):
+            status = "✅ filled immediately"
+        else:
+            status = f"⏳ GTC placed ({order_status or (order_id[:8] + '…') if order_id else 'pending'})"
 
         msg = (
             f"🏆 *Trade Opened*\n"
@@ -212,7 +217,7 @@ async def _scan_markets_inner(
         )
         await _send(app, msg)
 
-        if filled:
+        if placed:
             position_mgr.record_entry(
                 signal.token_id, signal.market_slug, signal.side,
                 signal.price_now, signal.tp_pct, signal.sl_pct,
