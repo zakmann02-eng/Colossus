@@ -26,9 +26,10 @@ _BLOCKED = {
     "fed rate", "interest rate", "inflation", "gdp",
     # Entertainment
     "oscar", "grammy", "emmy", "celebrity", "reality tv",
-    # Motorsport (multi-outcome, not binary)
+    # Motorsport — multi-outcome winner markets, not binary
     "formula 1", "f1", "grand prix", "fastest lap", "nascar", "indycar",
-    # Player prop stats — individual performance markets, not team win/loss
+    "500 winner", "400 winner", "300 winner", "race winner",
+    # Player prop stats — individual performance, not team win/loss
     "points", "rebounds", "assists", "steals", "blocks",
     "double-double", "triple-double",
     "rushing yards", "passing yards", "receiving yards",
