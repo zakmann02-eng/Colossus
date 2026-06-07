@@ -19,22 +19,11 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
 
 _BLOCKED = {
-    # Politics / macro
     "politics", "election", "president", "congress", "senate",
     "trump", "harris", "biden", "democrat", "republican",
     "war", "conflict", "invasion", "missile", "nato",
     "fed rate", "interest rate", "inflation", "gdp",
-    # Entertainment
     "oscar", "grammy", "emmy", "celebrity", "reality tv",
-    # Motorsport — multi-outcome winner markets, not binary
-    "formula 1", "f1", "grand prix", "fastest lap", "nascar", "indycar",
-    "500 winner", "400 winner", "300 winner", "race winner",
-    # Player prop stats — individual performance, not team win/loss
-    "points", "rebounds", "assists", "steals", "blocks",
-    "double-double", "triple-double",
-    "rushing yards", "passing yards", "receiving yards",
-    "touchdown", "strikeout", "home run", "batting",
-    "goals allowed", "save percentage",
 }
 
 
@@ -338,11 +327,17 @@ class PolymarketClient:
                 return []
             if isinstance(data, list):
                 return data
-            for key in ("positions", "data", "items", "portfolio", "results"):
-                val = data.get(key)
-                if isinstance(val, list):
-                    return val
-            logger.warning("get_open_positions: unrecognised response shape — keys: %s", list(data.keys()) if isinstance(data, dict) else type(data))
+            if isinstance(data, dict):
+                for key in ("positions", "data", "items", "portfolio", "results"):
+                    val = data.get(key)
+                    if isinstance(val, list):
+                        return val
+                    # Some endpoints wrap positions in a paginated dict
+                    if isinstance(val, dict):
+                        inner = val.get("positions") or val.get("data") or val.get("items") or []
+                        if isinstance(inner, list):
+                            return inner
+                logger.warning("get_open_positions: unrecognised response shape — keys: %s", list(data.keys()))
             return []
         except Exception as exc:
             logger.warning("get_open_positions failed: %s", exc)
@@ -375,14 +370,12 @@ class PolymarketClient:
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
         intent   = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
-        # Add 3-cent buffer so the order crosses the spread and fills immediately
-        fill_price = min(0.97, round(price + 0.03, 4))
-        quantity = max(1, round(amount_usd / fill_price))
+        quantity = max(1, round(amount_usd / price))
         order = {
             "marketSlug": market_slug,
             "intent":     intent,
             "type":       "ORDER_TYPE_LIMIT",
-            "price":      {"value": str(fill_price), "currency": "USD"},
+            "price":      {"value": str(round(price, 4)), "currency": "USD"},
             "quantity":   quantity,
             "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
         }
