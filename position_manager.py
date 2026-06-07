@@ -176,9 +176,7 @@ class PositionManager:
             size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
             if price <= 0 or size_usd <= 0:
                 continue
-            # Prefer a real CLOB token_id so get_current_price() works directly
-            real_tid = self._client.get_token_id_for_slug(slug, side)
-            token_id = real_tid or f"sync_{slug}_{side}"
+            token_id = f"sync_{slug}_{side}"
             self._entries[token_id] = _Entry(
                 market_slug = slug,
                 side        = side,
@@ -274,7 +272,6 @@ class PositionManager:
         return None
 
     async def check_positions(self) -> None:
-        # Pick up any positions that appeared since last cycle (manual or missed on startup)
         await self.sync_from_exchange()
         if not self._entries:
             logger.debug("No tracked positions — skipping TP/SL check")
