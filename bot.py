@@ -161,8 +161,9 @@ async def _scan_markets_inner(
     signals_fired = 0
 
     for market in markets:
-        mid = market.get("id") or market.get("conditionId") or ""
-        if mid in _traded_this_session:
+        mid        = market.get("id") or market.get("conditionId") or ""
+        event_slug = market.get("eventSlug") or market.get("slug") or ""
+        if mid in _traded_this_session or event_slug in _traded_this_session:
             continue
 
         await asyncio.sleep(0.5)  # 0.5s between markets — ~25 req/min, avoids IP ban
@@ -188,6 +189,8 @@ async def _scan_markets_inner(
 
         signals_fired += 1
         _traded_this_session.add(mid)
+        if event_slug:
+            _traded_this_session.add(event_slug)
 
         resp = await client.place_market_order(
             signal.market_slug, signal.side, signal.price_now, signal.amount_usd
