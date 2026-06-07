@@ -19,13 +19,21 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
 
 _BLOCKED = {
+    # Politics / macro
     "politics", "election", "president", "congress", "senate",
     "trump", "harris", "biden", "democrat", "republican",
     "war", "conflict", "invasion", "missile", "nato",
     "fed rate", "interest rate", "inflation", "gdp",
-    "cpi", "consumer price", "pce", "unemployment", "payroll", "fomc",
+    # Entertainment
     "oscar", "grammy", "emmy", "celebrity", "reality tv",
-    "crypto", "bitcoin", "ethereum", "btc", "eth",
+    # Motorsport (multi-outcome, not binary)
+    "formula 1", "f1", "grand prix", "fastest lap", "nascar", "indycar",
+    # Player prop stats — individual performance markets, not team win/loss
+    "points", "rebounds", "assists", "steals", "blocks",
+    "double-double", "triple-double",
+    "rushing yards", "passing yards", "receiving yards",
+    "touchdown", "strikeout", "home run", "batting",
+    "goals allowed", "save percentage",
 }
 
 
@@ -37,8 +45,7 @@ class PolymarketClient:
         self._us_client  = self._init_us_client()
         self._market_cache: dict = {}
         self._slug_map: dict[str, str] = {}
-        self._upcoming_offset: int = 0
-        self._last_markets: list = []
+        self._upcoming_offset: int = 0  # cached after first scan finds upcoming games
         logger.info("PolymarketClient ready — key_id %s…", self._key_id[:8])
 
     def _init_us_client(self):
@@ -64,24 +71,14 @@ class PolymarketClient:
             return None
 
     # ---------------------------------------------------------------- #
-    # Market scanning                                                    #
+    # Market scanning — SDK first, Gamma fallback                       #
     # ---------------------------------------------------------------- #
 
     async def get_sports_markets(self, limit=200):
         us_markets = await self._get_us_sdk_markets(limit)
-        if us_markets:
-            self._last_markets = us_markets
         allowed = [m for m in us_markets if self._is_allowed(m)]
         logger.info("Polymarket.US SDK: %d markets, %d allowed", len(us_markets), len(allowed))
         return allowed
-
-    def get_token_id_for_slug(self, slug: str, side: str = "YES") -> str | None:
-        for m in self._last_markets:
-            if self.get_market_slug(m) == slug:
-                tid = self.resolve_token_id(m, side)
-                if tid:
-                    return tid
-        return None
 
     async def _get_us_sdk_markets(self, limit=200) -> list[dict]:
         if not self._us_client:
@@ -118,6 +115,7 @@ class PolymarketClient:
             ) if data else []
 
         def _parse_ts(raw) -> float:
+            """Parse timestamp. Date-only strings (YYYY-MM-DD) are treated as end-of-day UTC."""
             if raw is None:
                 return 0.0
             try:
@@ -130,6 +128,7 @@ class PolymarketClient:
             try:
                 if "T" in s or len(s) > 10:
                     return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+                # Date-only: use 23:59:59 UTC so same-day games aren't falsely excluded
                 return datetime.fromisoformat(s + "T23:59:59+00:00").timestamp()
             except Exception:
                 return 0.0
@@ -147,7 +146,12 @@ class PolymarketClient:
             return _build_markets(_extract_events(data))
 
         try:
+            # API has ~16k events sorted oldest-first. Fetch from offset 13000 onwards
+            # to get the last ~3k events (roughly the past 2 weeks). The analyzer's
+            # seconds_to_resolution filter handles time-based pruning — no need to
+            # pre-filter for "upcoming" here.
             if self._upcoming_offset > 0:
+                # Cache stores end-of-pagination; start 2000 events back to catch new additions
                 start_offset = max(0, self._upcoming_offset - 2000)
                 logger.info("Resuming from cached end offset %d (start=%d)",
                             self._upcoming_offset, start_offset)
@@ -172,6 +176,7 @@ class PolymarketClient:
                 logger.info("Offset %d: %d events, dates %s", offset, len(page), rng)
                 all_markets.extend(page)
 
+            # Log a sample event on first run to aid field diagnostics
             if all_markets and self._upcoming_offset == 0:
                 sample = all_markets[-1]
                 logger.info("Sample event fields: %s", {
@@ -191,10 +196,14 @@ class PolymarketClient:
 
     def _is_allowed(self, market):
         if not market.get("active", True) or market.get("closed", False):
+            logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
+        # Pre-filter already-resolved markets before volume sort can promote them
         secs = self.seconds_to_resolution(market)
         if secs is not None and secs <= 0:
+            logger.debug("BLOCKED resolved(%.1fd ago): %s", abs(secs) / 86400, (market.get("question") or "")[:60])
             return False
+        # Skip completed/final games
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
             event_state = str(event_state_raw.get("status") or event_state_raw.get("state") or "").upper()
@@ -263,7 +272,16 @@ class PolymarketClient:
         return None
 
     async def has_liquidity(self, token_id: str, min_usd: float = 0.10) -> bool:
+        """Return True if the market has tradeable depth.
+
+        Polymarket.US runs its own order book independent of clob.polymarket.com.
+        We only use the CLOB as a hint when the token looks like a real CLOB hex ID;
+        otherwise assume liquidity exists and let the order attempt proceed.
+        A GTC order that finds no counterpart sits unfilled — no capital lost.
+        """
         tid = str(token_id)
+        # Only query CLOB for proper hex token IDs (32+ chars); slugs/condition IDs
+        # are Polymarket.US-only and the CLOB will return empty books for them.
         if len(tid) < 32 or not tid.replace("-", "").isalnum():
             return True
         book = await self._get(f"{CLOB_API}/book", params={"token_id": token_id})
@@ -274,11 +292,14 @@ class PolymarketClient:
         if not bids or not asks:
             logger.debug("Empty CLOB book for token %s… — assuming US liquidity", tid[:12])
             return True
+        # Both sides present — verify minimum depth
         ask_depth = sum(float(a.get("size", 0)) for a in asks[:3])
         bid_depth = sum(float(b.get("size", 0)) for b in bids[:3])
         if ask_depth < min_usd or bid_depth < min_usd:
-            logger.debug("Thin CLOB book for token %s… ask=%.2f bid=%.2f",
-                         tid[:12], ask_depth, bid_depth)
+            logger.debug(
+                "Thin CLOB book for token %s… ask=%.2f bid=%.2f",
+                tid[:12], ask_depth, bid_depth,
+            )
             return False
         return True
 
@@ -304,7 +325,7 @@ class PolymarketClient:
             return 999.0
         except Exception as exc:
             logger.warning("get_balance failed: %s — assuming funds available", exc)
-            return 999.0
+            return 999.0  # API error: don't block trading, let order attempt reveal true state
 
     async def get_open_positions(self):
         if not self._us_client:
@@ -316,15 +337,11 @@ class PolymarketClient:
                 return []
             if isinstance(data, list):
                 return data
-            if isinstance(data, dict):
-                for key in ("positions", "data", "items", "portfolio", "results"):
-                    if key not in data:
-                        continue
-                    val = data[key]
-                    if isinstance(val, list):
-                        return val
-                    return []
-            logger.warning("get_open_positions: unexpected type %s", type(data))
+            for key in ("positions", "data", "items", "portfolio", "results"):
+                val = data.get(key)
+                if isinstance(val, list):
+                    return val
+            logger.warning("get_open_positions: unrecognised response shape — keys: %s", list(data.keys()) if isinstance(data, dict) else type(data))
             return []
         except Exception as exc:
             logger.warning("get_open_positions failed: %s", exc)
@@ -356,17 +373,15 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, amount_usd: float
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
-        intent = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
-        if side == "YES":
-            order_price = round(min(price + 0.03, 0.97), 4)
-        else:
-            order_price = round(max(price - 0.03, 0.03), 4)
-        quantity = max(1, round(amount_usd / order_price))
+        intent   = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
+        # Add 3-cent buffer so the order crosses the spread and fills immediately
+        fill_price = min(0.97, round(price + 0.03, 4))
+        quantity = max(1, round(amount_usd / fill_price))
         order = {
             "marketSlug": market_slug,
             "intent":     intent,
             "type":       "ORDER_TYPE_LIMIT",
-            "price":      {"value": str(order_price), "currency": "USD"},
+            "price":      {"value": str(fill_price), "currency": "USD"},
             "quantity":   quantity,
             "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
         }
@@ -384,42 +399,6 @@ class PolymarketClient:
         except Exception as exc:
             logger.error("Order error: %s", exc)
         return None
-
-    async def get_order_status(self, order_id: str) -> dict | None:
-        if not self._us_client or not order_id:
-            return None
-        loop = asyncio.get_event_loop()
-        try:
-            orders_api = getattr(self._us_client, "orders", None)
-            if orders_api is None:
-                return None
-            getter = getattr(orders_api, "get", None) or getattr(orders_api, "retrieve", None)
-            if getter is None:
-                logger.warning("SDK has no orders.get/retrieve — cannot poll order status")
-                return None
-            return await loop.run_in_executor(None, lambda: getter(order_id))
-        except Exception as exc:
-            logger.warning("get_order_status(%s) failed: %s", order_id[:8], exc)
-            return None
-
-    async def cancel_order(self, order_id: str) -> bool:
-        if not self._us_client or not order_id:
-            return False
-        loop = asyncio.get_event_loop()
-        try:
-            orders_api = getattr(self._us_client, "orders", None)
-            if orders_api is None:
-                return False
-            canceller = getattr(orders_api, "cancel", None) or getattr(orders_api, "delete", None)
-            if canceller is None:
-                logger.warning("SDK has no orders.cancel/delete — cannot cancel order")
-                return False
-            await loop.run_in_executor(None, lambda: canceller(order_id))
-            logger.info("Cancelled order %s…", order_id[:16])
-            return True
-        except Exception as exc:
-            logger.warning("cancel_order(%s) failed: %s", order_id[:8], exc)
-            return False
 
     async def close_position(
         self, market_slug: str, side: str, price: float, size_usd: float
@@ -442,6 +421,7 @@ class PolymarketClient:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
         quantity = max(1, round(size_usd / price))
 
+        # Try sell intent first (exit long/short), fall back to buying the opposite side
         for intent in (
             "ORDER_INTENT_SELL_LONG" if side == "YES" else "ORDER_INTENT_SELL_SHORT",
             "ORDER_INTENT_BUY_SHORT" if side == "YES" else "ORDER_INTENT_BUY_LONG",
@@ -460,8 +440,7 @@ class PolymarketClient:
                 logger.info("Close response: %s", resp)
                 return resp
             except BadRequestError as exc:
-                logger.warning("Close intent %s rejected for %s: %s — trying fallback",
-                               intent, market_slug, exc)
+                logger.warning("Close intent %s rejected for %s: %s — trying fallback", intent, market_slug, exc)
             except AuthenticationError as exc:
                 logger.error("Auth error closing %s: %s", market_slug, exc)
                 return None
@@ -497,6 +476,7 @@ class PolymarketClient:
     async def get_market_price(self, market: dict, token_id: str) -> float | None:
         question = (market.get("question") or "")[:40]
 
+        # outcomePrices — skip if values are 0/1 (binary markers, not probabilities)
         op = market.get("outcomePrices")
         if op:
             try:
@@ -507,6 +487,7 @@ class PolymarketClient:
             except Exception:
                 pass
 
+        # marketSides — list of {side, price/probability} dicts
         sides = market.get("marketSides") or []
         logger.debug("marketSides for '%s': %r", question, sides)
         if sides:
@@ -515,6 +496,7 @@ class PolymarketClient:
                     sides = json.loads(sides)
                 for s in sides:
                     if isinstance(s, dict):
+                        # look for YES side price
                         if str(s.get("side") or s.get("outcome") or "").upper() in ("YES", "LONG", "0"):
                             for k in ("price", "probability", "lastPrice", "bestAsk", "bestBid"):
                                 raw = s.get(k)
@@ -522,6 +504,7 @@ class PolymarketClient:
                                     p = float(raw)
                                     if 0 < p < 1:
                                         return p
+                # fallback: just grab first numeric price in range
                 for s in sides:
                     if isinstance(s, dict):
                         for k in ("price", "probability", "lastPrice", "bestAsk", "bestBid"):
@@ -536,6 +519,7 @@ class PolymarketClient:
             except Exception as exc:
                 logger.info("marketSides parse error: %s", exc)
 
+        # outcomes — list or dict
         outcomes = market.get("outcomes") or []
         logger.debug("outcomes for '%s': %r", question, outcomes)
         if outcomes:
@@ -570,8 +554,7 @@ class PolymarketClient:
         if token_id and len(str(token_id)) >= 32 and str(token_id).replace("-", "").isalnum():
             return await self.get_current_price(token_id)
 
-        logger.debug("no-price fields for '%s': marketSides=%r outcomes=%r op=%r",
-                     question, sides, outcomes, op)
+        logger.debug("no-price fields for '%s': marketSides=%r outcomes=%r op=%r", question, sides, outcomes, op)
         return None
 
     def get_market_slug(self, market: dict) -> str:
@@ -618,6 +601,8 @@ class PolymarketClient:
                 if "T" in s or len(s) > 10:
                     end_ts = datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
                 else:
+                    # Date-only (YYYY-MM-DD): treat as end-of-day UTC so today's evening
+                    # games aren't falsely excluded (midnight UTC is already past by game time)
                     end_ts = datetime.fromisoformat(s + "T23:59:59+00:00").timestamp()
             return end_ts - time.time()
         except Exception:
