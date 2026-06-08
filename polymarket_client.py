@@ -380,7 +380,7 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, amount_usd: float
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
-    intent     = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
+        intent     = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
         fill_price = min(0.97, round(price + 0.03, 4))
         quantity   = max(1, round(amount_usd / fill_price))
         order = {
