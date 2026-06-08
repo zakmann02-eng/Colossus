@@ -19,13 +19,24 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
 
 _BLOCKED = {
+    # Politics / macro
     "politics", "election", "president", "congress", "senate",
     "trump", "harris", "biden", "democrat", "republican",
     "war", "conflict", "invasion", "missile", "nato",
     "fed rate", "interest rate", "inflation", "gdp",
+    # Entertainment
     "oscar", "grammy", "emmy", "celebrity", "reality tv",
+    # Motorsport (no bookmaker coverage → no edge signal)
+    "formula 1", "f1", "grand prix", "fastest lap", "nascar", "indycar",
+    "500 winner", "400 winner", "300 winner", "race winner",
+    # Player props (individual stats → high variance, no consensus odds)
+    "rebounds", "assists", "steals", "blocks",
+    "double-double", "triple-double",
+    "rushing yards", "passing yards", "receiving yards",
+    "touchdown", "strikeout", "home run", "batting average",
+    "goals allowed", "save percentage",
+    "player points", "total points scored by",
 }
-
 
 class PolymarketClient:
     def __init__(self, session, key_id: str, secret_key: str) -> None:
@@ -369,13 +380,14 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, amount_usd: float
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
-        intent   = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
-        quantity = max(1, round(amount_usd / price))
+              intent     = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
+        fill_price = min(0.97, round(price + 0.03, 4))
+        quantity   = max(1, round(amount_usd / fill_price))
         order = {
             "marketSlug": market_slug,
             "intent":     intent,
             "type":       "ORDER_TYPE_LIMIT",
-            "price":      {"value": str(round(price, 4)), "currency": "USD"},
+            "price":      {"value": str(fill_price), "currency": "USD"},
             "quantity":   quantity,
             "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
         }
