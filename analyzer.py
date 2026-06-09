@@ -11,7 +11,7 @@ Pre-filters (all must pass):
   - Not a period/quarter/inning sub-market
 
 Signal (T5) — required to trade:
-  T5  Bookmaker consensus probability differs from Polymarket price by ≥7%
+  T5  Bookmaker consensus probability differs from Polymarket price by ≥3%
       → also sets the correct side to bet (YES underpriced or NO underpriced)
 
 Confirmation signals (boost conviction, not required):
@@ -50,7 +50,7 @@ _PERIOD_RE = re.compile(
 
 MIN_PRICE    = 0.25
 MAX_PRICE    = 0.75
-MIN_VOL_24H  = 500.0
+MIN_VOL_24H  = 200.0
 MAX_DAYS_OUT = 7 * 86_400
 
 T1_LOW  = 0.40
