@@ -24,7 +24,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from analyzer import evaluate_market
 from polymarket_client import PolymarketClient
 from position_manager import PositionManager
-from sports_data import scan_stats, reset_scan_stats
+from sports_data import scan_stats, reset_scan_stats, MIN_EDGE
 
 load_dotenv()
 
