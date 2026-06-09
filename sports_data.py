@@ -28,6 +28,12 @@ MIN_EDGE = 0.03   # minimum 3% gap between bookmaker prob and Polymarket price
 _CACHE: dict[str, tuple[float, list]] = {}
 _CACHE_TTL = 12 * 3600.0
 
+# Per-scan counters — reset by bot.py at the start of each scan
+scan_stats: dict[str, int] = {"sport_matched": 0, "game_matched": 0, "above_threshold": 0}
+
+def reset_scan_stats() -> None:
+    scan_stats.update({"sport_matched": 0, "game_matched": 0, "above_threshold": 0})
+
 # Polymarket sport keywords → The Odds API sport key
 _SPORT_KEYS = {
     # US major leagues
@@ -308,6 +314,8 @@ async def get_bookmaker_signal(
         logger.debug("Sport not detected for: %s", (market.get("question") or "")[:60])
         return None
 
+    scan_stats["sport_matched"] += 1
+
     question = market.get("question") or ""
     team_a, team_b = _extract_teams(question)
     if not team_a:
@@ -345,6 +353,8 @@ async def get_bookmaker_signal(
         logger.debug("Could not map '%s' to bookmaker team in %s", team_a, probs)
         return None
 
+    scan_stats["game_matched"] += 1
+
     raw_edge = bm_prob - poly_price
     edge     = abs(raw_edge)
     side     = "YES" if raw_edge > 0 else "NO"
@@ -358,4 +368,5 @@ async def get_bookmaker_signal(
         logger.debug("Edge %.3f below threshold %.3f — skip", edge, MIN_EDGE)
         return None
 
+    scan_stats["above_threshold"] += 1
     return edge, side
