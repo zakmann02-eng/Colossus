@@ -24,6 +24,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from analyzer import evaluate_market
 from polymarket_client import PolymarketClient
 from position_manager import PositionManager
+from sports_data import scan_stats, reset_scan_stats
 
 load_dotenv()
 
@@ -140,6 +141,7 @@ async def _scan_markets_inner(
         os.environ["PAUSED_REASON"] = "low_funds"
         return
 
+    reset_scan_stats()
     markets = await client.get_sports_markets(limit=200)
     logger.info("Found %d eligible markets", len(markets))
 
@@ -227,8 +229,16 @@ async def _scan_markets_inner(
                 amount_usd=signal.amount_usd,
             )
 
-    if signals_fired == 0:
-        logger.info("No signals this scan")
+    logger.info(
+        "Scan done — %d evaluated | %d sport-matched | %d game-matched | "
+        "%d above %.0f%% threshold | %d trade(s) placed",
+        len(markets),
+        scan_stats["sport_matched"],
+        scan_stats["game_matched"],
+        scan_stats["above_threshold"],
+        MIN_EDGE * 100,
+        signals_fired,
+    )
 
 
 # ── Telegram commands ─────────────────────────────────────────────────────────
