@@ -140,7 +140,7 @@ async def _scan_markets_inner(
         os.environ["PAUSED_REASON"] = "low_funds"
         return
 
-    markets = await client.get_sports_markets(limit=50)
+    markets = await client.get_sports_markets(limit=200)
     logger.info("Found %d eligible markets", len(markets))
 
     # Sort by volume but cap at 5 markets per event to spread across sports
@@ -153,7 +153,7 @@ async def _scan_markets_inner(
         if count < 5:
             capped.append(m)
             seen_events[event_key] = count + 1
-        if len(capped) >= 50:
+        if len(capped) >= 200:
             break
     markets = capped
     logger.info("Evaluating %d markets across %d events", len(markets), len(seen_events))
