@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import os
@@ -15,11 +16,18 @@ logger = logging.getLogger(__name__)
 
 _PERSIST_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
 _RESERVE_FILE = os.path.join(os.path.dirname(__file__), "reserve.json")
+_TRADE_LOG    = os.path.join(os.path.dirname(__file__), "trade_log.csv")
 
 PROFIT_RESERVE_PCT = 0.30  # 30% of each TP profit locked away
 
-
 _PRICE_MISS_LIMIT = 5  # force-close after this many consecutive price misses
+
+_CSV_HEADERS = [
+    "timestamp", "market_slug", "side", "conviction",
+    "entry_price", "exit_price", "pnl_pct", "pnl_usd",
+    "outcome", "amount_usd", "triggers",
+]
+
 
 @dataclass
 class _Entry:
@@ -29,7 +37,9 @@ class _Entry:
     tp:           float
     sl:           float
     amount_usd:   float = 0.50
-    price_misses: int   = 0  # consecutive cycles where price lookup returned None
+    price_misses: int   = 0
+    conviction:   str   = ""
+    triggers:     str   = ""
 
 
 class PositionManager:
@@ -48,10 +58,8 @@ class PositionManager:
         self._default_sl = default_sl
         self._entries: dict[str, _Entry] = {}
 
-        # Profit reserve — persisted across restarts
         self._reserve_usd: float = 0.0
 
-        # Daily stats — reset at midnight UTC by send_daily_report()
         self._day_opened:   int   = 0
         self._day_tp:       int   = 0
         self._day_sl:       int   = 0
@@ -60,8 +68,7 @@ class PositionManager:
 
         self._load()
         self._load_reserve()
-
-    # ── Persistence ───────────────────────────────────────────────────
+        self._init_trade_log()
 
     def _load(self) -> None:
         try:
@@ -102,7 +109,41 @@ class PositionManager:
         except Exception as exc:
             logger.warning("Failed to save reserve.json: %s", exc)
 
-    # ── Public API ────────────────────────────────────────────────────
+    def _init_trade_log(self) -> None:
+        if not os.path.exists(_TRADE_LOG):
+            try:
+                with open(_TRADE_LOG, "w", newline="") as f:
+                    csv.DictWriter(f, fieldnames=_CSV_HEADERS).writeheader()
+                logger.info("Created trade log: %s", _TRADE_LOG)
+            except Exception as exc:
+                logger.warning("Could not create trade log: %s", exc)
+
+    def _log_trade(
+        self,
+        entry: _Entry,
+        exit_price: float,
+        pnl_pct: float,
+        pnl_usd: float,
+        outcome: str,
+    ) -> None:
+        try:
+            with open(_TRADE_LOG, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=_CSV_HEADERS)
+                writer.writerow({
+                    "timestamp":   datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                    "market_slug": entry.market_slug,
+                    "side":        entry.side,
+                    "conviction":  entry.conviction,
+                    "entry_price": round(entry.price, 4),
+                    "exit_price":  round(exit_price, 4),
+                    "pnl_pct":     round(pnl_pct * 100, 2),
+                    "pnl_usd":     round(pnl_usd, 4),
+                    "outcome":     outcome,
+                    "amount_usd":  round(entry.amount_usd, 2),
+                    "triggers":    entry.triggers,
+                })
+        except Exception as exc:
+            logger.warning("Failed to write trade log: %s", exc)
 
     @property
     def reserve_usd(self) -> float:
@@ -112,7 +153,6 @@ class PositionManager:
         self._day_opened += 1
 
     async def send_daily_report(self) -> None:
-        """Send end-of-day P&L report to Telegram and reset daily counters."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         total_closed = self._day_tp + self._day_sl
         win_rate = f"{self._day_tp / total_closed:.0%}" if total_closed > 0 else "N/A"
@@ -138,7 +178,6 @@ class PositionManager:
         except Exception as exc:
             logger.error("Failed to send daily report: %s", exc)
 
-        # Reset daily counters
         self._day_opened   = 0
         self._day_tp       = 0
         self._day_sl       = 0
@@ -205,6 +244,8 @@ class PositionManager:
         tp_pct:      float | None = None,
         sl_pct:      float | None = None,
         amount_usd:  float = 0.50,
+        conviction:  str   = "",
+        triggers:    list  | None = None,
     ) -> None:
         self._entries[token_id] = _Entry(
             market_slug = market_slug,
@@ -213,14 +254,17 @@ class PositionManager:
             tp          = tp_pct if tp_pct is not None else self._default_tp,
             sl          = sl_pct if sl_pct is not None else self._default_sl,
             amount_usd  = amount_usd,
+            conviction  = conviction,
+            triggers    = ",".join(triggers) if triggers else "",
         )
         self._save()
         self._day_opened += 1
         logger.info(
-            "Recorded entry: slug=%s side=%s price=%.3f TP=%.0f%% SL=%.0f%%",
+            "Recorded entry: slug=%s side=%s price=%.3f TP=%.0f%% SL=%.0f%% conviction=%s",
             market_slug, side, entry_price,
             (tp_pct or self._default_tp) * 100,
             (sl_pct or self._default_sl) * 100,
+            conviction,
         )
 
     def has_position(self, market_slug: str) -> bool:
@@ -380,6 +424,8 @@ class PositionManager:
                     tp          = entry.tp,
                     sl          = entry.sl,
                     amount_usd  = half_usd,
+                    conviction  = entry.conviction,
+                    triggers    = entry.triggers,
                 )
                 self._save()
                 pnl = (current_price - entry.price) / entry.price if entry.price else 0
@@ -414,12 +460,11 @@ class PositionManager:
         self._save()
 
         pnl = (current_price - entry.price) / entry.price if entry.price else 0
-        pnl_usd = entry.amount_usd * pnl  # signed
+        pnl_usd = entry.amount_usd * pnl
         is_tp = "TP" in reason
         is_manual = "Manual" in reason
         emoji = "✅" if is_tp else ("🏳️" if is_manual else "🔴")
 
-        # 30% profit preservation on TP exits
         reserved_now = 0.0
         if is_tp and pnl_usd > 0:
             reserved_now = round(pnl_usd * PROFIT_RESERVE_PCT, 4)
@@ -427,12 +472,22 @@ class PositionManager:
             self._save_reserve()
             self._day_reserved += reserved_now
 
-        # Daily stats
         self._day_pnl += pnl_usd
         if is_tp:
             self._day_tp += 1
         elif not is_manual:
             self._day_sl += 1
+
+        if is_tp:
+            outcome = "TP"
+        elif is_manual:
+            outcome = "MANUAL"
+        elif "Force" in reason:
+            outcome = "FORCE"
+        else:
+            outcome = "SL"
+
+        self._log_trade(entry, current_price, pnl, pnl_usd, outcome)
 
         pnl_abs = abs(pnl_usd)
         reserve_line = f"\n💰 Reserved: ${reserved_now:.2f} (total ${self._reserve_usd:.2f})" if reserved_now > 0 else ""
