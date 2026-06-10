@@ -27,6 +27,8 @@ from position_manager import PositionManager
 
 load_dotenv()
 
+# ── Logging ──────────────────────────────────────────────────────────────────
+
 def _setup_logging() -> None:
     handler = colorlog.StreamHandler()
     handler.setFormatter(colorlog.ColoredFormatter(
@@ -47,6 +49,8 @@ def _setup_logging() -> None:
 
 _setup_logging()
 logger = logging.getLogger(__name__)
+
+# ── Config ───────────────────────────────────────────────────────────────────
 
 def _require(name: str) -> str:
     val = os.getenv(name, "").strip()
@@ -69,6 +73,8 @@ SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL",     "60"))
 _traded_this_session: set[str] = set()
 
 
+# ── Telegram helpers ──────────────────────────────────────────────────────────
+
 async def _send(app: Application, text: str) -> None:
     try:
         await app.bot.send_message(
@@ -78,6 +84,8 @@ async def _send(app: Application, text: str) -> None:
     except Exception as exc:
         logger.error("Telegram send failed: %s", exc)
 
+
+# ── Core scan job ─────────────────────────────────────────────────────────────
 
 async def scan_markets(
     client: PolymarketClient,
@@ -96,6 +104,7 @@ async def _scan_markets_inner(
     position_mgr: PositionManager,
 ) -> None:
     if os.getenv("PAUSED", "false").lower() == "true":
+        # Auto-resume if we were paused due to low funds and balance has recovered
         if os.getenv("PAUSED_REASON") == "low_funds":
             balance = await client.get_balance()
             available = max(0.0, balance - position_mgr.reserve_usd)
@@ -130,9 +139,10 @@ async def _scan_markets_inner(
         os.environ["PAUSED_REASON"] = "low_funds"
         return
 
-    markets = await client.get_sports_markets(limit=50)
+    markets = await client.get_sports_markets(limit=100)
     logger.info("Found %d eligible markets", len(markets))
 
+    # Sort by volume but cap at 5 markets per event to spread across sports
     markets.sort(key=lambda m: float(m.get("volume24hr") or m.get("volume24Hour") or 0), reverse=True)
     seen_events: dict[str, int] = {}
     capped: list[dict] = []
@@ -142,7 +152,7 @@ async def _scan_markets_inner(
         if count < 5:
             capped.append(m)
             seen_events[event_key] = count + 1
-        if len(capped) >= 50:
+        if len(capped) >= 100:
             break
     markets = capped
     logger.info("Evaluating %d markets across %d events", len(markets), len(seen_events))
@@ -154,7 +164,7 @@ async def _scan_markets_inner(
         if mid in _traded_this_session:
             continue
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.5)  # 0.5s between markets — ~25 req/min, avoids IP ban
         try:
             signal = await evaluate_market(market, client)
         except Exception as exc:
@@ -164,6 +174,7 @@ async def _scan_markets_inner(
         if signal is None:
             continue
 
+        # Skip if we already have an open position on this market (survives redeployments)
         if position_mgr.has_position(signal.market_slug):
             logger.info("SKIP already-positioned: %s", signal.market_slug)
             continue
@@ -212,6 +223,8 @@ async def _scan_markets_inner(
         logger.info("No signals this scan")
 
 
+# ── Telegram commands ─────────────────────────────────────────────────────────
+
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     text = (
@@ -247,6 +260,7 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         curr = p.get("currentPrice") or p.get("marketPrice") or p.get("lastPrice") or "?"
         pnl  = p.get("percentPnl") or p.get("pnlPercent") or p.get("unrealizedPnlPercent") or "?"
         lines.append(f"• `{slug}`\n  size={size} avg={avg} now={curr} pnl={pnl}%")
+    # If every position had no recognisable fields, show raw keys for diagnosis
     if len(lines) == 1 and positions and isinstance(positions[0], dict):
         lines.append(f"_(fields: {', '.join(positions[0].keys())})_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
@@ -281,6 +295,8 @@ async def cmd_sellhalf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await update.message.reply_text("No tracked positions to sell.")
 
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
     logger.info("Colossus starting up…")
@@ -319,6 +335,7 @@ async def main() -> None:
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
+    # Register any positions already open on the exchange so TP/SL fires on them
     await pos_mgr.sync_from_exchange()
 
     mode = "Auto-trading" if trading_enabled else "Signal-alert mode (no client)"
