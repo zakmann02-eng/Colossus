@@ -18,9 +18,9 @@ _PERSIST_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
 _RESERVE_FILE = os.path.join(os.path.dirname(__file__), "reserve.json")
 _TRADE_LOG    = os.path.join(os.path.dirname(__file__), "trade_log.csv")
 
-PROFIT_RESERVE_PCT = 0.30  # 30% of each TP profit locked away
+PROFIT_RESERVE_PCT = 0.30
 
-_PRICE_MISS_LIMIT = 5  # force-close after this many consecutive price misses
+_PRICE_MISS_LIMIT = 5
 
 _CSV_HEADERS = [
     "timestamp", "market_slug", "side", "conviction",
@@ -148,6 +148,35 @@ class PositionManager:
     @property
     def reserve_usd(self) -> float:
         return self._reserve_usd
+
+    async def get_report(self) -> str:
+        if not self._entries:
+            return "No tracked positions."
+        lines = [f"*Live Position Report* ({len(self._entries)} open)\n"]
+        for token_id, entry in self._entries.items():
+            current_price = await self._get_price_for_entry(token_id, entry)
+            if current_price is None:
+                pnl_str = "price unavailable"
+                progress_str = "?"
+                now_str = "?"
+            else:
+                pnl = (current_price - entry.price) / entry.price if entry.price else 0.0
+                pnl_str = f"{'+'if pnl>=0 else ''}{pnl:.1%}"
+                now_str = f"{current_price:.3f}"
+                if entry.tp > 0:
+                    progress = min(pnl / entry.tp, 1.0)
+                    bar = "█" * int(progress * 10) + "░" * (10 - int(progress * 10))
+                    progress_str = f"{bar} {progress:.0%} to TP"
+                else:
+                    progress_str = "?"
+            lines.append(
+                f"• `{entry.market_slug[:32]}`\n"
+                f"  {entry.side} · Entry `{entry.price:.3f}` → Now `{now_str}`\n"
+                f"  P&L: *{pnl_str}* · TP {entry.tp:.0%} · SL {entry.sl:.0%}\n"
+                f"  {progress_str}\n"
+                f"  Conviction: {entry.conviction or '?'}"
+            )
+        return "\n".join(lines)
 
     def record_trade_opened(self) -> None:
         self._day_opened += 1
