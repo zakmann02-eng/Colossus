@@ -230,20 +230,32 @@ class PositionManager:
             slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
             if not slug or slug in tracked_slugs:
                 continue
-            intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
-            if "SHORT" in intent or "NO" in intent:
-                side = "NO"
-            elif "LONG" in intent or "YES" in intent:
-                side = "YES"
-            else:
-                net = float(p.get("netPosition") or p.get("netPositionDecimal") or 0)
+
+            # Polymarket.US portfolio format: netPosition (signed), cost dict
+            net_raw = p.get("netPosition") or p.get("netPositionDecimal")
+            if net_raw is not None:
+                net = float(net_raw)
                 side = "NO" if net < 0 else "YES"
-            avg_px = p.get("avgPx") or p.get("avgPrice") or p.get("price") or {}
-            price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
-            cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
-            size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
+                cost = p.get("cost") or {}
+                size_usd = float(cost.get("value") if isinstance(cost, dict) else cost or 0)
+                qty = abs(net)
+                price = round(size_usd / qty, 4) if qty > 0 else 0.50
+            else:
+                intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
+                if "SHORT" in intent or "NO" in intent:
+                    side = "NO"
+                elif "LONG" in intent or "YES" in intent:
+                    side = "YES"
+                else:
+                    side = "YES"
+                avg_px = p.get("avgPx") or p.get("avgPrice") or p.get("price") or {}
+                price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
+                cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
+                size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
+
             if price <= 0 or size_usd <= 0:
                 continue
+
             token_id = f"sync_{slug}_{side}"
             self._entries[token_id] = _Entry(
                 market_slug = slug,
@@ -320,15 +332,19 @@ class PositionManager:
                 slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
                 if slug != entry.market_slug:
                     continue
+                # Polymarket.US format: derive price from cost / netPosition
+                net_raw = p.get("netPosition") or p.get("netPositionDecimal")
+                if net_raw is not None:
+                    cost = p.get("cost") or {}
+                    size_usd = float(cost.get("value") if isinstance(cost, dict) else cost or 0)
+                    qty = abs(float(net_raw))
+                    if qty > 0 and size_usd > 0:
+                        return round(size_usd / qty, 4)
                 cash = p.get("cashValue") or p.get("currentValue") or p.get("value") or {}
                 curr_val = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
                 net_pos = abs(float(p.get("netPosition") or p.get("netPositionDecimal") or 0))
                 if curr_val > 0 and net_pos > 0:
                     return curr_val / net_pos
-                cps = p.get("costPerShare") or {}
-                cps_val = float(cps.get("value") if isinstance(cps, dict) else cps or 0)
-                if 0 < cps_val <= 1:
-                    return cps_val
                 raw_pnl = p.get("percentPnl") or p.get("unrealizedPnlPercent") or p.get("pnlPercent")
                 if raw_pnl is not None and entry.price > 0:
                     try:
@@ -403,28 +419,29 @@ class PositionManager:
             slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
             if not slug or slug in tracked_slugs:
                 continue
-            intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
-            if "SHORT" in intent or "NO" in intent:
-                side = "NO"
-            elif "LONG" in intent or "YES" in intent:
-                side = "YES"
-            else:
-                net = float(p.get("netPosition") or p.get("netPositionDecimal") or 0)
+            net_raw = p.get("netPosition") or p.get("netPositionDecimal")
+            if net_raw is not None:
+                net = float(net_raw)
                 side = "NO" if net < 0 else "YES"
-            cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
-            size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
-            avg_px = p.get("avgPx") or p.get("avgPrice") or p.get("price") or {}
-            price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
+                cost = p.get("cost") or {}
+                size_usd = float(cost.get("value") if isinstance(cost, dict) else cost or 0)
+                qty = abs(net)
+                price = round(size_usd / qty, 4) if qty > 0 else 0.50
+            else:
+                intent = str(p.get("intent") or p.get("side") or "").upper()
+                side = "NO" if "SHORT" in intent or "NO" in intent else "YES"
+                avg_px = p.get("avgPx") or p.get("avgPrice") or p.get("price") or {}
+                price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
+                cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
+                size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
             if size_usd <= 0:
                 continue
             try:
                 await self._client.close_position(slug, side, price, size_usd)
-                pnl_pct = float(p.get("percentPnl") or p.get("pnl") or 0)
                 msg = (
                     f"🏳️ *Position Closed* — Manual /sellall\n"
                     f"Market: `{slug}`\n"
-                    f"Side: {side} · Exit: {price:.3f}\n"
-                    f"P&L: {'+' if pnl_pct >= 0 else ''}{pnl_pct:.1f}%"
+                    f"Side: {side} · Exit: {price:.3f}"
                 )
                 await self._app.bot.send_message(
                     chat_id=self._chat_id, text=msg, parse_mode="Markdown",
