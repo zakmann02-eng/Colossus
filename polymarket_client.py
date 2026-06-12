@@ -320,16 +320,21 @@ class PolymarketClient:
             if isinstance(data, list):
                 return data
             if isinstance(data, dict):
-                for k, v in data.items():
-                    logger.info("  positions key=%s type=%s value=%s",
-                                k, type(v).__name__, str(v)[:200])
-                for key in ("positions", "availablePositions", "data", "items",
-                            "portfolio", "results", "openPositions", "holdings"):
-                    val = data.get(key)
-                    if isinstance(val, list):
-                        logger.info("get_open_positions: returning %d items from key '%s'", len(val), key)
-                        return val
-                logger.warning("get_open_positions: no list found — keys: %s", list(data.keys()))
+                positions_val = data.get("positions")
+                # API returns positions as a dict keyed by market slug
+                if isinstance(positions_val, dict) and positions_val:
+                    result = []
+                    for slug, pos in positions_val.items():
+                        if isinstance(pos, dict):
+                            entry = {**pos}
+                            entry["slug"]       = entry.get("slug") or slug
+                            entry["marketSlug"] = entry.get("marketSlug") or slug
+                            result.append(entry)
+                    logger.info("get_open_positions: converted %d positions from slug-keyed dict", len(result))
+                    return result
+                if isinstance(positions_val, list):
+                    return positions_val
+                logger.warning("get_open_positions: no usable positions — keys: %s", list(data.keys()))
         except Exception as exc:
             logger.warning("get_open_positions failed: %s", exc)
         return []
