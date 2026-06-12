@@ -313,36 +313,25 @@ class PolymarketClient:
         if not self._us_client:
             return []
         loop = asyncio.get_event_loop()
-
-        # Try portfolio.positions first, then account.positions as fallback
-        for fetcher in (
-            lambda: self._us_client.portfolio.positions(),
-            lambda: self._us_client.account.positions(),
-            lambda: self._us_client.portfolio.positions,   # property fallback
-        ):
-            try:
-                data = await loop.run_in_executor(None, fetcher)
-                logger.info("get_open_positions raw: type=%s value=%s",
-                            type(data).__name__, str(data)[:400])
-                if not data:
-                    continue
-                if isinstance(data, list):
-                    return data
-                if isinstance(data, dict):
-                    for key in ("positions", "data", "items", "portfolio",
-                                "results", "openPositions", "holdings"):
-                        val = data.get(key)
-                        if isinstance(val, list) and val:
-                            return val
-                    logger.warning(
-                        "get_open_positions: unrecognised dict shape — keys: %s",
-                        list(data.keys()),
-                    )
-            except AttributeError:
-                continue
-            except Exception as exc:
-                logger.warning("get_open_positions fetcher failed: %s", exc)
-                continue
+        try:
+            data = await loop.run_in_executor(None, self._us_client.portfolio.positions)
+            logger.info("get_open_positions raw: type=%s value=%s",
+                        type(data).__name__, str(data)[:600])
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    logger.info("  positions key=%s type=%s value=%s",
+                                k, type(v).__name__, str(v)[:200])
+                for key in ("positions", "availablePositions", "data", "items",
+                            "portfolio", "results", "openPositions", "holdings"):
+                    val = data.get(key)
+                    if isinstance(val, list):
+                        logger.info("get_open_positions: returning %d items from key '%s'", len(val), key)
+                        return val
+                logger.warning("get_open_positions: no list found — keys: %s", list(data.keys()))
+        except Exception as exc:
+            logger.warning("get_open_positions failed: %s", exc)
         return []
 
     # ---------------------------------------------------------------- #
