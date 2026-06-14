@@ -18,16 +18,15 @@ _PERSIST_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
 _RESERVE_FILE = os.path.join(os.path.dirname(__file__), "reserve.json")
 _TRADE_LOG    = os.path.join(os.path.dirname(__file__), "trade_log.csv")
 
-PROFIT_RESERVE_PCT = 0.30
-
-_PRICE_MISS_LIMIT = 5
-
 _CSV_HEADERS = [
-    "timestamp", "market_slug", "side", "conviction",
-    "entry_price", "exit_price", "pnl_pct", "pnl_usd",
-    "outcome", "amount_usd", "triggers",
+    "timestamp", "market_slug", "side", "entry_price", "exit_price",
+    "pnl_pct", "pnl_usd", "amount_usd", "conviction", "triggers", "reason",
 ]
 
+PROFIT_RESERVE_PCT = 0.30  # 30% of each TP profit locked away
+
+
+_PRICE_MISS_LIMIT = 5  # force-close after this many consecutive price misses
 
 @dataclass
 class _Entry:
@@ -58,8 +57,10 @@ class PositionManager:
         self._default_sl = default_sl
         self._entries: dict[str, _Entry] = {}
 
+        # Profit reserve — persisted across restarts
         self._reserve_usd: float = 0.0
 
+        # Daily stats — reset at midnight UTC by send_daily_report()
         self._day_opened:   int   = 0
         self._day_tp:       int   = 0
         self._day_sl:       int   = 0
@@ -68,7 +69,8 @@ class PositionManager:
 
         self._load()
         self._load_reserve()
-        self._init_trade_log()
+
+    # ── Persistence ───────────────────────────────────────────────────
 
     def _load(self) -> None:
         try:
@@ -114,36 +116,31 @@ class PositionManager:
             try:
                 with open(_TRADE_LOG, "w", newline="") as f:
                     csv.DictWriter(f, fieldnames=_CSV_HEADERS).writeheader()
-                logger.info("Created trade log: %s", _TRADE_LOG)
             except Exception as exc:
-                logger.warning("Could not create trade log: %s", exc)
+                logger.warning("Failed to init trade_log.csv: %s", exc)
 
-    def _log_trade(
-        self,
-        entry: _Entry,
-        exit_price: float,
-        pnl_pct: float,
-        pnl_usd: float,
-        outcome: str,
-    ) -> None:
+    def _log_trade(self, entry: "_Entry", exit_price: float, pnl_pct: float, pnl_usd: float, reason: str) -> None:
         try:
+            self._init_trade_log()
+            row = {
+                "timestamp":   datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "market_slug": entry.market_slug,
+                "side":        entry.side,
+                "entry_price": round(entry.price, 4),
+                "exit_price":  round(exit_price, 4),
+                "pnl_pct":     round(pnl_pct * 100, 2),
+                "pnl_usd":     round(pnl_usd, 4),
+                "amount_usd":  round(entry.amount_usd, 2),
+                "conviction":  entry.conviction,
+                "triggers":    entry.triggers,
+                "reason":      reason,
+            }
             with open(_TRADE_LOG, "a", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=_CSV_HEADERS)
-                writer.writerow({
-                    "timestamp":   datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                    "market_slug": entry.market_slug,
-                    "side":        entry.side,
-                    "conviction":  entry.conviction,
-                    "entry_price": round(entry.price, 4),
-                    "exit_price":  round(exit_price, 4),
-                    "pnl_pct":     round(pnl_pct * 100, 2),
-                    "pnl_usd":     round(pnl_usd, 4),
-                    "outcome":     outcome,
-                    "amount_usd":  round(entry.amount_usd, 2),
-                    "triggers":    entry.triggers,
-                })
+                csv.DictWriter(f, fieldnames=_CSV_HEADERS).writerow(row)
         except Exception as exc:
-            logger.warning("Failed to write trade log: %s", exc)
+            logger.warning("Failed to log trade to CSV: %s", exc)
+
+    # ── Public API ────────────────────────────────────────────────────
 
     @property
     def reserve_usd(self) -> float:
@@ -156,6 +153,7 @@ class PositionManager:
         for token_id, entry in self._entries.items():
             current_price = await self._get_price_for_entry(token_id, entry)
             if current_price is None:
+                pnl = 0.0
                 pnl_str = "price unavailable"
                 progress_str = "?"
                 now_str = "?"
@@ -182,6 +180,7 @@ class PositionManager:
         self._day_opened += 1
 
     async def send_daily_report(self) -> None:
+        """Send end-of-day P&L report to Telegram and reset daily counters."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         total_closed = self._day_tp + self._day_sl
         win_rate = f"{self._day_tp / total_closed:.0%}" if total_closed > 0 else "N/A"
@@ -207,6 +206,7 @@ class PositionManager:
         except Exception as exc:
             logger.error("Failed to send daily report: %s", exc)
 
+        # Reset daily counters
         self._day_opened   = 0
         self._day_tp       = 0
         self._day_sl       = 0
@@ -255,7 +255,6 @@ class PositionManager:
 
             if price <= 0 or size_usd <= 0:
                 continue
-
             token_id = f"sync_{slug}_{side}"
             self._entries[token_id] = _Entry(
                 market_slug = slug,
@@ -286,7 +285,7 @@ class PositionManager:
         sl_pct:      float | None = None,
         amount_usd:  float = 0.50,
         conviction:  str   = "",
-        triggers:    list  | None = None,
+        triggers:    list | None = None,
     ) -> None:
         self._entries[token_id] = _Entry(
             market_slug = market_slug,
@@ -296,16 +295,15 @@ class PositionManager:
             sl          = sl_pct if sl_pct is not None else self._default_sl,
             amount_usd  = amount_usd,
             conviction  = conviction,
-            triggers    = ",".join(triggers) if triggers else "",
+            triggers    = ", ".join(triggers) if triggers else "",
         )
         self._save()
         self._day_opened += 1
         logger.info(
-            "Recorded entry: slug=%s side=%s price=%.3f TP=%.0f%% SL=%.0f%% conviction=%s",
+            "Recorded entry: slug=%s side=%s price=%.3f TP=%.0f%% SL=%.0f%%",
             market_slug, side, entry_price,
             (tp_pct or self._default_tp) * 100,
             (sl_pct or self._default_sl) * 100,
-            conviction,
         )
 
     def has_position(self, market_slug: str) -> bool:
@@ -332,19 +330,15 @@ class PositionManager:
                 slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
                 if slug != entry.market_slug:
                     continue
-                # Polymarket.US format: derive price from cost / netPosition
-                net_raw = p.get("netPosition") or p.get("netPositionDecimal")
-                if net_raw is not None:
-                    cost = p.get("cost") or {}
-                    size_usd = float(cost.get("value") if isinstance(cost, dict) else cost or 0)
-                    qty = abs(float(net_raw))
-                    if qty > 0 and size_usd > 0:
-                        return round(size_usd / qty, 4)
                 cash = p.get("cashValue") or p.get("currentValue") or p.get("value") or {}
                 curr_val = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
                 net_pos = abs(float(p.get("netPosition") or p.get("netPositionDecimal") or 0))
                 if curr_val > 0 and net_pos > 0:
                     return curr_val / net_pos
+                cps = p.get("costPerShare") or {}
+                cps_val = float(cps.get("value") if isinstance(cps, dict) else cps or 0)
+                if 0 < cps_val <= 1:
+                    return cps_val
                 raw_pnl = p.get("percentPnl") or p.get("unrealizedPnlPercent") or p.get("pnlPercent")
                 if raw_pnl is not None and entry.price > 0:
                     try:
@@ -419,29 +413,28 @@ class PositionManager:
             slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
             if not slug or slug in tracked_slugs:
                 continue
-            net_raw = p.get("netPosition") or p.get("netPositionDecimal")
-            if net_raw is not None:
-                net = float(net_raw)
-                side = "NO" if net < 0 else "YES"
-                cost = p.get("cost") or {}
-                size_usd = float(cost.get("value") if isinstance(cost, dict) else cost or 0)
-                qty = abs(net)
-                price = round(size_usd / qty, 4) if qty > 0 else 0.50
+            intent = str(p.get("intent") or p.get("side") or p.get("positionType") or "").upper()
+            if "SHORT" in intent or "NO" in intent:
+                side = "NO"
+            elif "LONG" in intent or "YES" in intent:
+                side = "YES"
             else:
-                intent = str(p.get("intent") or p.get("side") or "").upper()
-                side = "NO" if "SHORT" in intent or "NO" in intent else "YES"
-                avg_px = p.get("avgPx") or p.get("avgPrice") or p.get("price") or {}
-                price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
-                cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
-                size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
+                net = float(p.get("netPosition") or p.get("netPositionDecimal") or 0)
+                side = "NO" if net < 0 else "YES"
+            cash = p.get("cashValue") or p.get("value") or p.get("size") or {}
+            size_usd = float(cash.get("value") if isinstance(cash, dict) else cash or 0)
+            avg_px = p.get("avgPx") or p.get("avgPrice") or p.get("price") or {}
+            price = float(avg_px.get("value") if isinstance(avg_px, dict) else avg_px or 0.50) or 0.50
             if size_usd <= 0:
                 continue
             try:
                 await self._client.close_position(slug, side, price, size_usd)
+                pnl_pct = float(p.get("percentPnl") or p.get("pnl") or 0)
                 msg = (
                     f"🏳️ *Position Closed* — Manual /sellall\n"
                     f"Market: `{slug}`\n"
-                    f"Side: {side} · Exit: {price:.3f}"
+                    f"Side: {side} · Exit: {price:.3f}\n"
+                    f"P&L: {'+' if pnl_pct >= 0 else ''}{pnl_pct:.1f}%"
                 )
                 await self._app.bot.send_message(
                     chat_id=self._chat_id, text=msg, parse_mode="Markdown",
@@ -506,11 +499,13 @@ class PositionManager:
         self._save()
 
         pnl = (current_price - entry.price) / entry.price if entry.price else 0
-        pnl_usd = entry.amount_usd * pnl
+        pnl_usd = entry.amount_usd * pnl  # signed
         is_tp = "TP" in reason
         is_manual = "Manual" in reason
+        self._log_trade(entry, current_price, pnl, pnl_usd, reason)
         emoji = "✅" if is_tp else ("🏳️" if is_manual else "🔴")
 
+        # 30% profit preservation on TP exits
         reserved_now = 0.0
         if is_tp and pnl_usd > 0:
             reserved_now = round(pnl_usd * PROFIT_RESERVE_PCT, 4)
@@ -518,22 +513,12 @@ class PositionManager:
             self._save_reserve()
             self._day_reserved += reserved_now
 
+        # Daily stats
         self._day_pnl += pnl_usd
         if is_tp:
             self._day_tp += 1
         elif not is_manual:
             self._day_sl += 1
-
-        if is_tp:
-            outcome = "TP"
-        elif is_manual:
-            outcome = "MANUAL"
-        elif "Force" in reason:
-            outcome = "FORCE"
-        else:
-            outcome = "SL"
-
-        self._log_trade(entry, current_price, pnl, pnl_usd, outcome)
 
         pnl_abs = abs(pnl_usd)
         reserve_line = f"\n💰 Reserved: ${reserved_now:.2f} (total ${self._reserve_usd:.2f})" if reserved_now > 0 else ""
