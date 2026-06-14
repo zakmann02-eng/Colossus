@@ -25,7 +25,6 @@ _CSV_HEADERS = [
 
 PROFIT_RESERVE_PCT = 0.30  # 30% of each TP profit locked away
 
-
 _PRICE_MISS_LIMIT = 5  # force-close after this many consecutive price misses
 
 @dataclass
@@ -56,6 +55,7 @@ class PositionManager:
         self._default_tp = default_tp
         self._default_sl = default_sl
         self._entries: dict[str, _Entry] = {}
+        self._closed_this_session: set[str] = set()  # slugs closed this run — never re-sync
 
         # Profit reserve — persisted across restarts
         self._reserve_usd: float = 0.0
@@ -228,7 +228,7 @@ class PositionManager:
                 continue
             meta = p.get("marketMetadata") or {}
             slug = meta.get("slug") or p.get("marketSlug") or p.get("slug") or ""
-            if not slug or slug in tracked_slugs:
+            if not slug or slug in tracked_slugs or slug in self._closed_this_session:
                 continue
 
             # Polymarket.US portfolio format: netPosition (signed), cost dict
@@ -496,6 +496,7 @@ class PositionManager:
                 entry.market_slug, exc,
             )
         self._entries.pop(token_id, None)
+        self._closed_this_session.add(entry.market_slug)
         self._save()
 
         pnl = (current_price - entry.price) / entry.price if entry.price else 0
