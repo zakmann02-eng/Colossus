@@ -46,6 +46,7 @@ _SPORT_KEYS = {
     "ncaaf":        "americanfootball_ncaaf",
     "wnba":         "basketball_wnba",
     # International soccer
+    "worldcup":     "soccer_fifa_world_cup",
     "epl":          "soccer_epl",
     "laliga":       "soccer_spain_la_liga",
     "bundesliga":   "soccer_germany_bundesliga",
@@ -90,6 +91,9 @@ _SPORT_KEYWORDS = {
     "ncaab":        ["ncaab", "college basketball", "march madness"],
     "ncaaf":        ["ncaaf", "college football", "cfp"],
     "wnba":         ["wnba", "women's basketball"],
+    # World Cup — checked before other soccer to avoid false league matches
+    "worldcup":     ["world cup", "fifa world cup", "copa mundial", "worldcup",
+                     "wc 2026", "wc2026", "fifa wc", "world cup 2026"],
     # International soccer — check before generic "soccer" to avoid MLS collision
     "epl":          ["premier league", "epl", "man city", "man united", "arsenal",
                      "chelsea", "liverpool", "tottenham", "newcastle", "aston villa"],
@@ -144,9 +148,9 @@ def _detect_sport(market: dict) -> str:
     question = (market.get("question") or "").lower()
     combined = f"{tags} {slug} {question}"
 
-    # Check specific leagues first so "premier league" beats generic "soccer",
-    # "wimbledon" beats generic "tennis", etc.
+    # Check specific leagues first — worldcup before other soccer to avoid collisions
     priority = [
+        "worldcup",
         "epl", "laliga", "bundesliga", "seriea", "ligue1", "ucl", "uel",
         "ligamx", "brasileirao", "eredivisie",
         "wimbledon", "frenchopen", "usopen_tennis", "ausopen",
@@ -252,7 +256,7 @@ def _consensus_probs(bookmakers: list[dict]) -> dict[str, float]:
 
 
 async def _fetch_odds(sport_key: str, session: aiohttp.ClientSession) -> list[dict]:
-    """Fetch odds for a sport, caching for 6 hours to conserve API quota."""
+    """Fetch odds for a sport, caching for 12 hours to conserve API quota."""
     now = time.time()
     if sport_key in _CACHE:
         ts, data = _CACHE[sport_key]
