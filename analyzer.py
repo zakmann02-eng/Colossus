@@ -11,6 +11,7 @@ Need 2+ triggers to fire a trade:
   T2  Game is currently in-play (started but not yet resolved — live volatility)
   T3  24h volume > 1.5x daily average (unusual interest)
   T4  Resolves within 48h (imminent resolution — tight time window)
+  T5  Bookmaker consensus diverges from Polymarket price by ≥3% (primary edge signal)
 
 Position sizing by triggers fired:
   2 triggers → MED  → $0.35–$0.65  · TP 20% · SL 8%
@@ -26,6 +27,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+
+from sports_data import get_bookmaker_signal
 
 if TYPE_CHECKING:
     from polymarket_client import PolymarketClient
@@ -198,11 +201,19 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     if secs is not None and 0 < secs <= T4_SECS:
         triggers.append(f"T4:hrs={secs/3600:.0f}h")
 
+    # T5: bookmaker consensus diverges from Polymarket by ≥3% — primary edge signal
+    bm_side: str | None = None
+    bm_result = await get_bookmaker_signal(market, price, client._session)
+    if bm_result is not None:
+        bm_edge, bm_side = bm_result
+        triggers.append(f"T5:bm_edge={bm_edge:.2f}")
+
     if len(triggers) < 2:
         logger.debug("SKIP triggers=%d (price=%.2f): %s", len(triggers), price, question[:60])
         return None
 
-    side = _decide_side(price, market)
+    # Use bookmaker's side when available — it defines the actual mispricing direction
+    side = bm_side if bm_side else _decide_side(price, market)
     trade_token = token_id if side == "YES" else (client.resolve_token_id(market, "NO") or token_id)
 
     if not await client.has_liquidity(trade_token, min_usd=0.10):
