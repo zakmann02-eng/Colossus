@@ -104,6 +104,7 @@ async def _scan_markets_inner(
     position_mgr: PositionManager,
 ) -> None:
     if os.getenv("PAUSED", "false").lower() == "true":
+        # Auto-resume if we were paused due to low funds and balance has recovered
         if os.getenv("PAUSED_REASON") == "low_funds":
             balance = await client.get_balance()
             available = max(0.0, balance - position_mgr.reserve_usd)
@@ -163,7 +164,7 @@ async def _scan_markets_inner(
         if mid in _traded_this_session:
             continue
 
-        await asyncio.sleep(0.5)  # 0.5s between markets — avoids IP ban
+        await asyncio.sleep(0.5)  # 0.5s between markets — ~25 req/min, avoids IP ban
         try:
             signal = await evaluate_market(market, client)
         except Exception as exc:
@@ -173,6 +174,7 @@ async def _scan_markets_inner(
         if signal is None:
             continue
 
+        # Skip if we already have an open position on this market (survives redeployments)
         if position_mgr.has_position(signal.market_slug):
             logger.info("SKIP already-positioned: %s", signal.market_slug)
             continue
@@ -258,6 +260,7 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         curr = p.get("currentPrice") or p.get("marketPrice") or p.get("lastPrice") or "?"
         pnl  = p.get("percentPnl") or p.get("pnlPercent") or p.get("unrealizedPnlPercent") or "?"
         lines.append(f"• `{slug}`\n  size={size} avg={avg} now={curr} pnl={pnl}%")
+    # If every position had no recognisable fields, show raw keys for diagnosis
     if len(lines) == 1 and positions and isinstance(positions[0], dict):
         lines.append(f"_(fields: {', '.join(positions[0].keys())})_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
@@ -339,6 +342,7 @@ async def main() -> None:
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
+    # Register any positions already open on the exchange so TP/SL fires on them
     await pos_mgr.sync_from_exchange()
 
     mode = "Auto-trading" if trading_enabled else "Signal-alert mode (no client)"
@@ -366,4 +370,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
