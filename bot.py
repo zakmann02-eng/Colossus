@@ -2,8 +2,8 @@
 Colossus — autonomous Polymarket sports trading bot.
 
 Uses polymarket-us SDK for authenticated trading on Polymarket.US.
-Scans markets every 60s, fires on 1+ triggers, places up to $2 orders,
-monitors positions for TP/SL every 5 min. Telegram alerts throughout.
+Scans markets every 60s, fires on 2+ triggers, places up to $1 orders,
+monitors positions for TP/SL every 1 min. Telegram alerts throughout.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import sys
 from datetime import datetime, timezone
 
@@ -66,8 +67,8 @@ POLY_SECRET_KEY = _require("POLYMARKET_SECRET_KEY")
 
 MIN_TRADE_USD = float(os.getenv("MIN_TRADE_USD",   "0.10"))
 MAX_TRADE_USD = float(os.getenv("MAX_TRADE_USD",   "1.00"))
-TP_PCT        = float(os.getenv("TAKE_PROFIT_PCT", "10.0")) / 100
-SL_PCT        = float(os.getenv("STOP_LOSS_PCT",   "10.0")) / 100
+TP_PCT        = float(os.getenv("TAKE_PROFIT_PCT", "20.0")) / 100
+SL_PCT        = float(os.getenv("STOP_LOSS_PCT",   "8.0"))  / 100
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL",     "60"))
 
 _traded_this_session: set[str] = set()
@@ -92,70 +93,18 @@ async def scan_markets(
     app: Application,
     position_mgr: PositionManager,
 ) -> None:
-    try:
-        await _scan_markets_inner(client, app, position_mgr)
-    except Exception as exc:
-        logger.error("scan_markets crashed: %s", exc, exc_info=True)
-
-
-async def _scan_markets_inner(
-    client: PolymarketClient,
-    app: Application,
-    position_mgr: PositionManager,
-) -> None:
     if os.getenv("PAUSED", "false").lower() == "true":
-        # Auto-resume if we were paused due to low funds and balance has recovered
-        if os.getenv("PAUSED_REASON") == "low_funds":
-            balance = await client.get_balance()
-            available = max(0.0, balance - position_mgr.reserve_usd)
-            if available >= MIN_TRADE_USD:
-                os.environ["PAUSED"] = "false"
-                os.environ.pop("PAUSED_REASON", None)
-                await _send(app, f"▶️ *Colossus auto-resumed* — available balance restored (${available:.2f})")
-                logger.info("Auto-resumed: available $%.2f", available)
-            else:
-                logger.info("Still paused — available funds $%.2f (reserve $%.2f)", available, position_mgr.reserve_usd)
-                return
-        else:
-            logger.info("Bot paused — skipping scan")
-            return
+        logger.info("Bot paused — skipping scan")
+        return
 
     logger.info("Scanning markets…")
     balance = await client.get_balance()
-    available = max(0.0, balance - position_mgr.reserve_usd)
-    if available < MIN_TRADE_USD:
-        logger.warning(
-            "Insufficient available balance ($%.2f; reserve $%.2f) — halting trades",
-            available, position_mgr.reserve_usd,
-        )
-        await _send(app, (
-            f"⛔ *Colossus halted — insufficient funds*\n"
-            f"Balance: ${balance:.2f} · Reserve: ${position_mgr.reserve_usd:.2f}\n"
-            f"Available: ${available:.2f} (minimum: ${MIN_TRADE_USD:.2f})\n"
-            f"Watching for funds — will auto-resume when balance recovers.\n"
-            f"Or deposit and the next scan will pick it up automatically."
-        ))
-        os.environ["PAUSED"] = "true"
-        os.environ["PAUSED_REASON"] = "low_funds"
+    if balance < MIN_TRADE_USD:
+        logger.info("Insufficient balance ($%.2f) — skipping trades", balance)
         return
 
     markets = await client.get_sports_markets(limit=100)
     logger.info("Found %d eligible markets", len(markets))
-
-    # Sort by volume but cap at 5 markets per event to spread across sports
-    markets.sort(key=lambda m: float(m.get("volume24hr") or m.get("volume24Hour") or 0), reverse=True)
-    seen_events: dict[str, int] = {}
-    capped: list[dict] = []
-    for m in markets:
-        event_key = m.get("eventSlug") or m.get("slug") or ""
-        count = seen_events.get(event_key, 0)
-        if count < 5:
-            capped.append(m)
-            seen_events[event_key] = count + 1
-        if len(capped) >= 100:
-            break
-    markets = capped
-    logger.info("Evaluating %d markets across %d events", len(markets), len(seen_events))
 
     signals_fired = 0
 
@@ -164,7 +113,6 @@ async def _scan_markets_inner(
         if mid in _traded_this_session:
             continue
 
-        await asyncio.sleep(0.5)  # 0.5s between markets — ~25 req/min, avoids IP ban
         try:
             signal = await evaluate_market(market, client)
         except Exception as exc:
@@ -174,16 +122,10 @@ async def _scan_markets_inner(
         if signal is None:
             continue
 
-        # Skip if we already have an open position on this market (survives redeployments)
-        if position_mgr.has_position(signal.market_slug):
-            logger.info("SKIP already-positioned: %s", signal.market_slug)
-            continue
-
         balance = await client.get_balance()
-        available = max(0.0, balance - position_mgr.reserve_usd)
-        if available < signal.amount_usd:
-            logger.info("Insufficient available ($%.2f) for $%.2f trade — skipping", available, signal.amount_usd)
-            continue
+        if balance < signal.amount_usd:
+            logger.info("Insufficient balance ($%.2f) for $%.2f trade — stopping", balance, signal.amount_usd)
+            break
 
         signals_fired += 1
         _traded_this_session.add(mid)
@@ -241,28 +183,16 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     client: PolymarketClient = ctx.bot_data["client"]
-    raw = await client.get_open_positions()
-    try:
-        positions = list(raw)[:10] if raw else []
-    except Exception:
-        positions = []
+    positions = await client.get_open_positions()
     if not positions:
         await update.message.reply_text("No open positions.")
         return
-    lines = [f"*Open Positions* ({len(positions)})\n"]
-    for p in positions:
-        if not isinstance(p, dict):
-            lines.append(f"• (non-dict entry: {str(p)[:60]})")
-            continue
-        slug = (p.get("marketSlug") or p.get("slug") or p.get("market") or p.get("name") or "unknown")[:25]
-        size = p.get("size") or p.get("quantity") or p.get("shares") or "?"
-        avg  = p.get("avgPrice") or p.get("price") or p.get("avgCost") or "?"
-        curr = p.get("currentPrice") or p.get("marketPrice") or p.get("lastPrice") or "?"
-        pnl  = p.get("percentPnl") or p.get("pnlPercent") or p.get("unrealizedPnlPercent") or "?"
-        lines.append(f"• `{slug}`\n  size={size} avg={avg} now={curr} pnl={pnl}%")
-    # If every position had no recognisable fields, show raw keys for diagnosis
-    if len(lines) == 1 and positions and isinstance(positions[0], dict):
-        lines.append(f"_(fields: {', '.join(positions[0].keys())})_")
+    lines = ["*Open Positions*\n"]
+    for p in positions[:10]:
+        slug = (p.get("marketSlug") or p.get("slug") or "")[:20]
+        size = p.get("size") or p.get("quantity") or "?"
+        avg  = p.get("avgPrice") or p.get("price") or "?"
+        lines.append(f"• `{slug}` size={size} avg={avg}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -276,30 +206,15 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("▶️ Bot resumed.")
 
 
-async def cmd_sellall(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    pos_mgr: PositionManager = ctx.bot_data["pos_mgr"]
-    await update.message.reply_text("🏳️ Closing all open positions…")
-    count = await pos_mgr.sell_all()
-    if count:
-        await update.message.reply_text(f"Done — {count} position(s) closed.")
-    else:
-        await update.message.reply_text("No tracked positions to close.")
-
-
-async def cmd_sellhalf(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    pos_mgr: PositionManager = ctx.bot_data["pos_mgr"]
-    await update.message.reply_text("✂️ Selling half of each open position…")
-    count = await pos_mgr.sell_half()
-    if count:
-        await update.message.reply_text(f"Done — halved {count} position(s).")
-    else:
-        await update.message.reply_text("No tracked positions to sell.")
-
-
 async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     pos_mgr: PositionManager = ctx.bot_data["pos_mgr"]
-    text = await pos_mgr.get_report()
-    await update.message.reply_text(text, parse_mode="Markdown")
+    report = await pos_mgr.get_report()
+    await update.message.reply_text(report, parse_mode="Markdown")
+
+
+async def daily_report(app: Application, pos_mgr: PositionManager) -> None:
+    report = await pos_mgr.get_report()
+    await _send(app, report)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -321,8 +236,6 @@ async def main() -> None:
     app.add_handler(CommandHandler("positions", cmd_positions))
     app.add_handler(CommandHandler("pause",     cmd_pause))
     app.add_handler(CommandHandler("resume",    cmd_resume))
-    app.add_handler(CommandHandler("sellall",   cmd_sellall))
-    app.add_handler(CommandHandler("sellhalf",  cmd_sellhalf))
     app.add_handler(CommandHandler("report",    cmd_report))
 
     scheduler = AsyncIOScheduler()
@@ -334,7 +247,8 @@ async def main() -> None:
         pos_mgr.check_positions, "interval", minutes=1, id="positions",
     )
     scheduler.add_job(
-        pos_mgr.send_daily_report, "cron", hour=23, minute=55, id="daily_report",
+        daily_report, "cron", hour=23, minute=55,
+        args=[app, pos_mgr], id="daily_report",
     )
     scheduler.start()
 
@@ -342,16 +256,13 @@ async def main() -> None:
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
-    # Register any positions already open on the exchange so TP/SL fires on them
-    await pos_mgr.sync_from_exchange()
-
     mode = "Auto-trading" if trading_enabled else "Signal-alert mode (no client)"
     await _send(app, (
         f"🤖 *Colossus online*\n"
         f"Mode: {mode}\n"
         f"Scanning every {SCAN_INTERVAL}s · TP {TP_PCT:.0%} · SL {SL_PCT:.0%}\n"
         f"Trade range: ${MIN_TRADE_USD:.2f}–${MAX_TRADE_USD:.2f}\n"
-        "Commands: /status /positions /report /pause /resume /sellall /sellhalf"
+        "Commands: /status /positions /report /pause /resume"
     ))
 
     logger.info("Bot running. Press Ctrl+C to stop.")
@@ -370,3 +281,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
