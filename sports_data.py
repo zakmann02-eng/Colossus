@@ -1,376 +1,294 @@
 """
-Sports data — bookmaker consensus odds via The Odds API.
+Bookmaker odds integration via The Odds API.
 
-Set ODDS_API_KEY in Railway env vars (free at the-odds-api.com, 500 req/month).
-Uses a 12-hour cache per sport. With ~15 active sport keys that's ~30 req/day (~300/month).
+Fetches consensus win-probability for the team/player relevant to a Polymarket
+market question and compares it to the current Polymarket price.
 
-Returns the edge between what bookmakers price a team and what Polymarket prices it.
-A positive edge means Polymarket is underpricing the correct side — that's our bet.
+Returns (edge, side) when bookmaker consensus diverges by ≥ MIN_EDGE from the
+Polymarket price, else None.
+
+Cache: per-sport event list is cached for _CACHE_TTL seconds to stay well
+within the free-tier rate limit (500 requests/month).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-import re
 import time
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import aiohttp
 
+if TYPE_CHECKING:
+    pass
+
 logger = logging.getLogger(__name__)
 
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
-_BASE = "https://api.the-odds-api.com/v4"
-MIN_EDGE = 0.03   # minimum 3% gap between bookmaker prob and Polymarket price
+MIN_EDGE   = 0.03          # 3 % minimum edge to fire T5
+_CACHE_TTL = 12 * 3600.0   # 12 hours per sport key
 
-# 12-hour cache per sport key — with more sports, keeps us under 500 req/month free tier
-_CACHE: dict[str, tuple[float, list]] = {}
-_CACHE_TTL = 12 * 3600.0
-
-# Per-scan counters — reset by bot.py at the start of each scan
-scan_stats: dict[str, int] = {"sport_matched": 0, "game_matched": 0, "above_threshold": 0}
-
-def reset_scan_stats() -> None:
-    scan_stats.update({"sport_matched": 0, "game_matched": 0, "above_threshold": 0})
-
-# Polymarket sport keywords → The Odds API sport key
-_SPORT_KEYS = {
-    # US major leagues
-    "nba":          "basketball_nba",
-    "nfl":          "americanfootball_nfl",
-    "mlb":          "baseball_mlb",
-    "nhl":          "icehockey_nhl",
-    "mls":          "soccer_usa_mls",
-    "ncaab":        "basketball_ncaab",
-    "ncaaf":        "americanfootball_ncaaf",
-    "wnba":         "basketball_wnba",
-    # International soccer
+# ── Odds API sport keys ────────────────────────────────────────────────────────
+_SPORT_KEYS: dict[str, str] = {
+    "soccer":       "soccer_epl",
+    "football":     "americanfootball_nfl",
+    "basketball":   "basketball_nba",
+    "baseball":     "baseball_mlb",
+    "hockey":       "icehockey_nhl",
+    "mma":          "mma_mixed_martial_arts",
+    "ufc":          "mma_mixed_martial_arts",
+    "boxing":       "boxing",
+    "tennis":       "tennis_atp_french_open",
+    "cricket":      "cricket_test_match",
+    "golf":         "golf_pga_championship",
+    "rugby":        "rugbyleague_nrl",
+    "aussierules":  "aussierules_afl",
     "worldcup":     "soccer_fifa_world_cup",
-    "epl":          "soccer_epl",
-    "laliga":       "soccer_spain_la_liga",
+    "copa":         "soccer_conmebol_copa_libertadores",
+    "champions":    "soccer_uefa_champs_league",
+    "europa":       "soccer_uefa_europa_league",
     "bundesliga":   "soccer_germany_bundesliga",
+    "laliga":       "soccer_spain_la_liga",
     "seriea":       "soccer_italy_serie_a",
     "ligue1":       "soccer_france_ligue_one",
-    "ucl":          "soccer_uefa_champs_league",
-    "uel":          "soccer_uefa_europa_league",
-    "ligamx":       "soccer_mexico_ligamx",
-    "brasileirao":  "soccer_brazil_campeonato",
-    "eredivisie":   "soccer_netherlands_eredivisie",
-    "premierleague_aus": "soccer_australia_aleague",
-    # UFC / MMA
-    "ufc":          "mma_mixed_martial_arts",
-    # Tennis (major tournaments)
-    "wimbledon":    "tennis_atp_wimbledon",
-    "usopen_tennis": "tennis_atp_us_open",
-    "frenchopen":   "tennis_atp_french_open",
-    "ausopen":      "tennis_atp_aus_open",
-    "wta_wimbledon": "tennis_wta_wimbledon",
-    "wta_usopen":   "tennis_wta_us_open",
-    "wta_frenchopen": "tennis_wta_french_open",
-    "wta_ausopen":  "tennis_wta_aus_open",
-    # Boxing
-    "boxing":       "boxing_boxing",
-    # Cricket
-    "cricket_odi":  "cricket_odi",
-    "cricket_test": "cricket_test_match",
-    # Rugby
-    "nrl":          "rugbyleague_nrl",
-    "superrugby":   "rugbyunion_super_rugby",
+    "nba":          "basketball_nba",
+    "wnba":         "basketball_wnba",
+    "nfl":          "americanfootball_nfl",
+    "ncaaf":        "americanfootball_ncaaf",
+    "mlb":          "baseball_mlb",
+    "nhl":          "icehockey_nhl",
+    "f1":           "motorsport_formula_one_winner",
 }
 
-# Sport keyword aliases for detection
-_SPORT_KEYWORDS = {
-    # US leagues
-    "nba":          ["nba", " nba ", "basketball"],
-    "nfl":          ["nfl", " nfl ", "quarterback", "superbowl", "super bowl"],
-    "mlb":          ["mlb", " mlb ", "baseball", "pitcher", "world series"],
-    "nhl":          ["nhl", " nhl ", "stanley cup"],
-    "mls":          [" mls ", "soccer_usa", "sporting kc", "nycfc", "lafc", "sounders",
-                     "revolution", "red bulls"],
-    "ncaab":        ["ncaab", "college basketball", "march madness"],
-    "ncaaf":        ["ncaaf", "college football", "cfp"],
-    "wnba":         ["wnba", "women's basketball"],
-    # World Cup — checked before other soccer to avoid false league matches
-    "worldcup":     ["world cup", "fifa world cup", "copa mundial", "worldcup",
-                     "wc 2026", "wc2026", "fifa wc", "world cup 2026"],
-    # International soccer — check before generic "soccer" to avoid MLS collision
-    "epl":          ["premier league", "epl", "man city", "man united", "arsenal",
-                     "chelsea", "liverpool", "tottenham", "newcastle", "aston villa"],
-    "laliga":       ["la liga", "laliga", "real madrid", "barcelona", "atletico madrid",
-                     "sevilla", "real sociedad"],
-    "bundesliga":   ["bundesliga", "bayern munich", "borussia dortmund", "rb leipzig",
-                     "bayer leverkusen"],
-    "seriea":       ["serie a", "juventus", "inter milan", "ac milan", "napoli", "roma",
-                     "lazio"],
-    "ligue1":       ["ligue 1", "ligue1", "psg", "paris saint-germain", "marseille",
-                     "lyon", "monaco"],
-    "ucl":          ["champions league", "ucl", "uefa champions"],
-    "uel":          ["europa league", "uel", "uefa europa"],
-    "ligamx":       ["liga mx", "ligamx", "club america", "chivas", "cruz azul",
-                     "tigres", "monterrey"],
-    "brasileirao":  ["brasileirao", "brasileirão", "flamengo", "palmeiras", "corinthians",
-                     "são paulo", "santos"],
-    "eredivisie":   ["eredivisie", "ajax", "psv", "feyenoord"],
-    # UFC / MMA
-    "ufc":          ["ufc", "mma", "mixed martial arts", "octagon", "bellator",
-                     "one championship"],
-    # Tennis
-    "wimbledon":    ["wimbledon", "atp wimbledon", "wta wimbledon"],
-    "usopen_tennis": ["us open tennis", "usta", "flushing meadows"],
-    "frenchopen":   ["french open", "roland garros", "roland-garros"],
-    "ausopen":      ["australian open", "aus open", "atp aus"],
-    "wta_wimbledon": ["wta wimbledon"],
-    "wta_usopen":   ["wta us open"],
-    "wta_frenchopen": ["wta french open", "wta roland garros"],
-    "wta_ausopen":  ["wta australian open"],
-    # Boxing
-    "boxing":       ["boxing", "heavyweight", "welterweight", "lightweight bout",
-                     "wbc", "wba", "ibf title"],
-    # Cricket
-    "cricket_odi":  ["cricket", "odi", "t20", "ipl", "test match"],
-    "cricket_test": ["test cricket", "ashes"],
-    # Rugby
-    "nrl":          ["nrl", "rugby league", "state of origin"],
-    "superrugby":   ["super rugby", "rugby union", "six nations", "all blacks",
-                     "springboks"],
+# ── Keywords → sport key lookup ────────────────────────────────────────────────
+_SPORT_KEYWORDS: dict[str, list[str]] = {
+    "worldcup":   ["world cup", "fifa world cup", "copa mundial", "worldcup",
+                   "world cup 2026", "2026 world cup"],
+    "ufc":        ["ufc", "ultimate fighting championship"],
+    "mma":        ["mma", "bellator", "one championship", "pfl"],
+    "boxing":     ["boxing", "wbc", "wba", "ibf", "wbo", "heavyweight fight",
+                   "lightweight fight", "welterweight"],
+    "tennis":     ["wta", "atp", "tennis", "wimbledon", "french open",
+                   "us open", "australian open", "roland garros"],
+    "soccer":     ["premier league", "epl", "la liga", "serie a", "bundesliga",
+                   "ligue 1", "mls", "soccer", "football match",
+                   "champions league", "europa league"],
+    "champions":  ["champions league", "ucl"],
+    "europa":     ["europa league", "uel"],
+    "basketball": ["nba", "wnba", "basketball"],
+    "baseball":   ["mlb", "baseball"],
+    "hockey":     ["nhl", "hockey", "ice hockey"],
+    "football":   ["nfl", "ncaaf", "super bowl", "american football"],
+    "golf":       ["pga", "golf", "masters", "open championship"],
+    "f1":         ["formula 1", "formula one", "f1", "grand prix"],
+    "copa":       ["copa libertadores", "copa sudamericana"],
 }
 
 
-def _detect_sport(market: dict) -> str:
-    """Return sport key from market tags/slug/question, or empty string."""
-    tags = " ".join(
-        str(t).lower() if isinstance(t, str)
-        else (t.get("label") or t.get("name") or "").lower()
-        for t in (market.get("tags") or [])
-    )
-    slug     = (market.get("eventSlug") or market.get("slug") or "").lower()
-    question = (market.get("question") or "").lower()
-    combined = f"{tags} {slug} {question}"
+# ── Cache ──────────────────────────────────────────────────────────────────────
 
-    # Check specific leagues first — worldcup before other soccer to avoid collisions
-    priority = [
-        "worldcup",
-        "epl", "laliga", "bundesliga", "seriea", "ligue1", "ucl", "uel",
-        "ligamx", "brasileirao", "eredivisie",
-        "wimbledon", "frenchopen", "usopen_tennis", "ausopen",
-        "wta_wimbledon", "wta_frenchopen", "wta_usopen", "wta_ausopen",
-        "ufc", "boxing", "cricket_test", "cricket_odi",
-        "nrl", "superrugby",
-        "nba", "nfl", "mlb", "nhl", "mls", "ncaab", "ncaaf", "wnba",
-    ]
-    for sport in priority:
-        keywords = _SPORT_KEYWORDS.get(sport, [])
-        if any(kw in combined for kw in keywords):
-            return sport
-    return ""
+_cache: dict[str, tuple[float, list[dict]]] = {}
+_cache_lock = asyncio.Lock()
 
 
-def _extract_teams(question: str) -> tuple[str, str]:
+def _detect_sport(text: str) -> str | None:
+    t = text.lower()
+    for sport, keywords in _SPORT_KEYWORDS.items():
+        for kw in keywords:
+            if kw in t:
+                return sport
+    return None
+
+
+def _extract_consensus_prob(outcomes: list[dict], target: str) -> float | None:
     """
-    Extract two team names from a Polymarket question.
-    Returns (focus_team, opponent) or ("", "") if parsing fails.
+    Average implied probability across all bookmakers for the given outcome name.
+    target is matched case-insensitively anywhere in the outcome name.
     """
-    q = question.strip()
-
-    # "X vs Y" / "X v Y"
-    m = re.search(r'^(.+?)\s+v(?:s\.?|ersus)\s+(.+?)(?:\s*[:\-?]|$)', q, re.IGNORECASE)
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-
-    # "Will [the] TEAM beat/defeat TEAM"
-    m = re.search(
-        r'will\s+(?:the\s+)?(.+?)\s+(?:beat|defeat|win\s+(?:against|vs\.?))\s+(?:the\s+)?(.+?)(?:\?|$)',
-        q, re.IGNORECASE,
-    )
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-
-    # "Will [the] TEAM win" (single-team question)
-    m = re.search(r'will\s+(?:the\s+)?(.+?)\s+win', q, re.IGNORECASE)
-    if m:
-        return m.group(1).strip(), ""
-
-    # "TEAM to win"
-    m = re.search(r'^(.+?)\s+to\s+win', q, re.IGNORECASE)
-    if m:
-        return m.group(1).strip(), ""
-
-    return "", ""
-
-
-def _token_overlap(a: str, b: str) -> float:
-    """Fraction of tokens in the shorter string that appear in the longer."""
-    stop = {"the", "fc", "sc", "city", "united", "athletic"}
-    ta = set(re.sub(r'[^\w\s]', '', a).lower().split()) - stop
-    tb = set(re.sub(r'[^\w\s]', '', b).lower().split()) - stop
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / min(len(ta), len(tb))
-
-
-def _find_game(games: list[dict], team_a: str, team_b: str) -> Optional[dict]:
-    """Fuzzy-match a game by team names. Returns best match or None."""
-    best_score = 0.4
-    best_game  = None
-    for g in games:
-        home = g.get("home_team", "")
-        away = g.get("away_team", "")
-        sim_a = max(_token_overlap(team_a, home), _token_overlap(team_a, away))
-        if team_b:
-            sim_b = max(_token_overlap(team_b, home), _token_overlap(team_b, away))
-            score = sim_a + sim_b
-            if score > best_score and sim_a > 0.25 and sim_b > 0.25:
-                best_score = score
-                best_game  = g
-        else:
-            if sim_a > best_score:
-                best_score = sim_a
-                best_game  = g
-    return best_game
-
-
-def _consensus_probs(bookmakers: list[dict]) -> dict[str, float]:
-    """
-    Average h2h moneyline probabilities across all bookmakers, vig-removed.
-    Returns {team_name: probability} dict.
-    """
-    team_probs: dict[str, list[float]] = {}
-    for bm in bookmakers:
-        for mkt in bm.get("markets", []):
-            if mkt.get("key") != "h2h":
-                continue
-            outcomes = mkt.get("outcomes", [])
-            raw: dict[str, float] = {}
-            for o in outcomes:
-                price = float(o.get("price") or 0)
-                if price > 0:
-                    raw[o["name"]] = 1.0 / price
-            total = sum(raw.values())
-            if total <= 0:
-                continue
-            for name, implied in raw.items():
-                team_probs.setdefault(name, []).append(implied / total)
-
-    return {name: sum(ps) / len(ps) for name, ps in team_probs.items() if ps}
-
-
-async def _fetch_odds(sport_key: str, session: aiohttp.ClientSession) -> list[dict]:
-    """Fetch odds for a sport, caching for 12 hours to conserve API quota."""
-    now = time.time()
-    if sport_key in _CACHE:
-        ts, data = _CACHE[sport_key]
-        if now - ts < _CACHE_TTL:
-            logger.debug("Odds cache hit for %s (age %.0fmin)", sport_key, (now - ts) / 60)
-            return data
-
-    url = f"{_BASE}/sports/{sport_key}/odds"
-    params = {
-        "apiKey":      ODDS_API_KEY,
-        "regions":     "us",
-        "markets":     "h2h",
-        "oddsFormat":  "decimal",
-        "dateFormat":  "iso",
-    }
-    try:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status == 200:
-                games = await r.json()
-                _CACHE[sport_key] = (now, games)
-                remaining = r.headers.get("x-requests-remaining", "?")
-                logger.info("Odds API: %d games for %s (quota remaining: %s)", len(games), sport_key, remaining)
-                return games
-            elif r.status == 401:
-                logger.error("Odds API: invalid ODDS_API_KEY")
-            elif r.status == 422:
-                logger.debug("Odds API: sport %s not currently available", sport_key)
-            elif r.status == 429:
-                logger.warning("Odds API: monthly quota exhausted")
+    target_l = target.lower()
+    probs: list[float] = []
+    for outcome in outcomes:
+        name = (outcome.get("name") or "").lower()
+        if target_l not in name and name not in target_l:
+            continue
+        price = outcome.get("price")
+        if price is None:
+            continue
+        try:
+            p = float(price)
+            # Decimal odds (>= 1.0) vs American odds
+            if p >= 1.0:
+                probs.append(1.0 / p)
             else:
-                logger.debug("Odds API status %d for %s", r.status, sport_key)
-    except Exception as exc:
-        logger.debug("Odds API fetch error: %s", exc)
+                probs.append(p)
+        except (TypeError, ValueError):
+            pass
+    return sum(probs) / len(probs) if probs else None
 
-    _CACHE[sport_key] = (now, [])
+
+async def _fetch_sport_events(sport_key: str, session: aiohttp.ClientSession) -> list[dict]:
+    """Fetch upcoming events for a sport key with caching."""
+    api_key = os.getenv("ODDS_API_KEY", "").strip()
+    if not api_key:
+        return []
+
+    async with _cache_lock:
+        cached = _cache.get(sport_key)
+        if cached and time.time() - cached[0] < _CACHE_TTL:
+            return cached[1]
+
+    url = (
+        f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
+        f"?apiKey={api_key}&regions=us&markets=h2h&oddsFormat=decimal&dateFormat=iso"
+    )
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                async with _cache_lock:
+                    _cache[sport_key] = (time.time(), data)
+                logger.debug("Odds API: fetched %d events for %s", len(data), sport_key)
+                return data
+            elif resp.status == 401:
+                logger.warning("Odds API: invalid key (401)")
+            elif resp.status == 422:
+                logger.debug("Odds API: sport %s not available (422)", sport_key)
+            elif resp.status == 429:
+                logger.warning("Odds API: rate limit hit (429)")
+            else:
+                logger.debug("Odds API: HTTP %d for %s", resp.status, sport_key)
+    except asyncio.TimeoutError:
+        logger.debug("Odds API: timeout for %s", sport_key)
+    except Exception as exc:
+        logger.debug("Odds API error for %s: %s", sport_key, exc)
     return []
+
+
+def _find_matching_event(events: list[dict], question: str) -> dict | None:
+    """
+    Try to match a Polymarket question to an Odds API event.
+    Looks for team/player name overlap.
+    """
+    q = question.lower()
+    best: dict | None = None
+    best_score = 0
+
+    for event in events:
+        home = (event.get("home_team") or "").lower()
+        away = (event.get("away_team") or "").lower()
+        score = 0
+        if home and home in q:
+            score += 2
+        if away and away in q:
+            score += 2
+        # Partial word match
+        for part in home.split():
+            if len(part) > 3 and part in q:
+                score += 1
+        for part in away.split():
+            if len(part) > 3 and part in q:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best = event
+
+    return best if best_score >= 2 else None
 
 
 async def get_bookmaker_signal(
     market: dict,
-    poly_price: float,
+    polymarket_price: float,
     session: aiohttp.ClientSession,
-) -> Optional[tuple[float, str]]:
+) -> tuple[float, str] | None:
     """
-    Compare Polymarket price against bookmaker consensus odds.
+    Compare bookmaker consensus to Polymarket price.
 
-    Returns (edge, side) where:
-      edge = abs(bookmaker_prob - poly_price)  [e.g. 0.12 = 12%]
-      side = "YES" if bookmaker thinks YES is underpriced, "NO" otherwise
+    Returns (edge, side) if bookmaker consensus diverges by ≥ MIN_EDGE,
+    where side is "YES" if bookmaker says the outcome is more likely than
+    Polymarket implies, else "NO".
 
-    Returns None if no key, no sport match, no game match, or edge below threshold.
+    Returns None if no signal or no data available.
     """
-    if not ODDS_API_KEY:
+    question = market.get("question") or market.get("title") or ""
+    if not question:
         return None
 
-    sport = _detect_sport(market)
+    sport = _detect_sport(question)
+    if not sport:
+        return None
+
     sport_key = _SPORT_KEYS.get(sport)
     if not sport_key:
-        logger.debug("Sport not detected for: %s", (market.get("question") or "")[:60])
         return None
 
-    scan_stats["sport_matched"] += 1
-
-    question = market.get("question") or ""
-    team_a, team_b = _extract_teams(question)
-    if not team_a:
-        logger.debug("Could not extract teams from: %s", question[:60])
+    events = await _fetch_sport_events(sport_key, session)
+    if not events:
         return None
 
-    games = await _fetch_odds(sport_key, session)
-    if not games:
+    event = _find_matching_event(events, question)
+    if not event:
+        logger.debug("Odds API: no event match for: %s", question[:60])
         return None
 
-    game = _find_game(games, team_a, team_b)
-    if not game:
-        logger.debug("No bookmaker game match: '%s' / '%s' in %s", team_a, team_b, sport_key)
+    # Determine which team/player the Polymarket question is asking about
+    home = event.get("home_team") or ""
+    away = event.get("away_team") or ""
+    q_lower = question.lower()
+
+    target_team: str | None = None
+    if home.lower() in q_lower or any(p in q_lower for p in home.lower().split() if len(p) > 3):
+        target_team = home
+    elif away.lower() in q_lower or any(p in q_lower for p in away.lower().split() if len(p) > 3):
+        target_team = away
+
+    if not target_team:
         return None
 
-    probs = _consensus_probs(game.get("bookmakers", []))
-    if not probs:
-        logger.debug("No h2h bookmaker odds for %s vs %s", game.get("home_team"), game.get("away_team"))
-        return None
+    # Collect all outcome prices across bookmakers
+    all_outcomes: list[dict] = []
+    for bm in event.get("bookmakers", []):
+        for mkt in bm.get("markets", []):
+            if mkt.get("key") == "h2h":
+                all_outcomes.extend(mkt.get("outcomes", []))
 
-    home = game.get("home_team", "")
-    away = game.get("away_team", "")
-    sim_home = _token_overlap(team_a, home)
-    sim_away = _token_overlap(team_a, away)
-    focus_team = home if sim_home >= sim_away else away
-
-    bm_prob: Optional[float] = None
-    for name, prob in probs.items():
-        if _token_overlap(team_a, name) >= 0.5:
-            bm_prob = prob
-            break
+    bm_prob = _extract_consensus_prob(all_outcomes, target_team)
     if bm_prob is None:
-        bm_prob = probs.get(focus_team)
-    if bm_prob is None:
-        logger.debug("Could not map '%s' to bookmaker team in %s", team_a, probs)
+        logger.debug("Odds API: no odds for %s in event %s", target_team, event.get("id"))
         return None
 
-    scan_stats["game_matched"] += 1
+    # Vig-normalise: collect raw implied probs for all outcomes in this event
+    all_team_probs: list[float] = []
+    for outcome in all_outcomes:
+        price = outcome.get("price")
+        if price is None:
+            continue
+        try:
+            p = float(price)
+            all_team_probs.append(1.0 / p if p >= 1.0 else p)
+        except (TypeError, ValueError):
+            pass
 
-    raw_edge = bm_prob - poly_price
-    edge     = abs(raw_edge)
-    side     = "YES" if raw_edge > 0 else "NO"
+    n_bm = max(1, len(event.get("bookmakers", [])))
+    if all_team_probs:
+        total_raw = sum(all_team_probs) / (len(all_team_probs) / n_bm)
+        if total_raw > 0:
+            bm_prob = bm_prob / total_raw
 
+    bm_prob = max(0.01, min(0.99, bm_prob))
+    edge = bm_prob - polymarket_price
+
+    if abs(edge) < MIN_EDGE:
+        logger.debug(
+            "Odds API: edge %.2f%% below threshold for %s",
+            abs(edge) * 100, question[:50],
+        )
+        return None
+
+    side = "YES" if edge > 0 else "NO"
     logger.info(
-        "Bookmaker signal | '%s' | bm=%.3f poly=%.3f edge=+%.3f → %s",
-        question[:55], bm_prob, poly_price, edge, side,
+        "T5 signal: %s | bm_prob=%.3f poly_price=%.3f edge=%.2f%% side=%s",
+        question[:50], bm_prob, polymarket_price, abs(edge) * 100, side,
     )
+    return abs(edge), side
 
-    if edge < MIN_EDGE:
-        logger.debug("Edge %.3f below threshold %.3f — skip", edge, MIN_EDGE)
-        return None
-
-    scan_stats["above_threshold"] += 1
-    return edge, side
