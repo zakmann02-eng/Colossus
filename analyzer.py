@@ -2,30 +2,27 @@
 Trigger evaluation and trade decision logic.
 
 Pre-filters (all must pass):
-  - Price between 0.25 and 0.75 (no extreme underdogs/favorites)
+  - Price between 0.05 and 0.95
   - Minimum $200 24h volume
   - Must resolve within 7 days (weekly/daily trading)
 
-Need 2+ triggers to fire a trade:
-  T1  Price inside 40-60% range (coin-flip uncertainty — market is genuinely unsettled)
-  T2  Game is currently in-play (started but not yet resolved — live volatility)
-  T3  24h volume > 1.5x daily average (unusual interest)
-  T4  Resolves within 48h (imminent resolution — tight time window)
-  T5  Bookmaker consensus diverges from Polymarket price by ≥3% (primary edge signal)
+Requires 2+ triggers to fire a trade:
+  T1  Price outside 40-60% range (mispriced market)
+  T2  Price moved >= 1% in last 15 min
+  T3  24h volume > 1.5x daily average
+  T4  Resolves within 7 days
+  T5  Bookmaker consensus ≥ 3% edge over Polymarket price
 
 Position sizing by triggers fired:
-  2 triggers → MED  → $0.35–$0.65  · TP 20% · SL 8%
-  3+ triggers→ HIGH → $0.65–$1.00  · TP 25% · SL 10%
+  2 triggers → MED  → $0.35–$0.65 · TP 20% · SL 8%
+  3+ triggers→ HIGH → $0.65–$1.00 · TP 25% · SL 10%
 """
 
 from __future__ import annotations
 
 import logging
 import random
-import re
-import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from sports_data import get_bookmaker_signal
@@ -35,28 +32,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Intra-game period markets resolve in minutes — no edge, catastrophic SL bleed
-_PERIOD_RE = re.compile(
-    r'\b([1-4][QqHh]|[QqHh][1-4]|1st|2nd|3rd|4th)\b'
-    r'|quarter|halftime|half.time|period\s*\d|inning\s*\d',
-    re.IGNORECASE,
-)
-
-# eventState values that indicate a game is currently live
-_LIVE_STATES = {
-    "IN_PROGRESS", "INPROGRESS", "IN_PLAY", "INPLAY",
-    "LIVE", "STARTED", "ACTIVE_GAME", "ONGOING",
-}
-
-MIN_PRICE    = 0.25
-MAX_PRICE    = 0.75
+MIN_PRICE    = 0.05
+MAX_PRICE    = 0.95
 MIN_VOL_24H  = 200.0
 MAX_DAYS_OUT = 7 * 86_400
 
 T1_LOW  = 0.40
 T1_HIGH = 0.60
+T2_MOVE = 0.01
 T3_MULT = 1.5
-T4_SECS = 2 * 86_400   # 48h window
+T4_SECS = 7 * 86_400
+T5_MIN_EDGE = 0.03
 
 _TIERS = {
     2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.20, "sl": 0.08},
@@ -76,8 +62,8 @@ class TradeSignal:
     score:       int       = 0
     event_date:  str       = "N/A"
     amount_usd:  float     = 0.50
-    tp_pct:      float     = 0.08
-    sl_pct:      float     = 0.12
+    tp_pct:      float     = 0.20
+    sl_pct:      float     = 0.08
     conviction:  str       = "MED"
 
 
@@ -88,29 +74,8 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
-def _parse_ts(raw) -> float:
-    if raw is None:
-        return 0.0
-    try:
-        ts = float(raw)
-        if ts > 1_000_000_000:
-            return ts
-    except (TypeError, ValueError):
-        pass
-    try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return 0.0
-
-
 def _decide_side(price: float, market: dict | None = None) -> str:
-    if market:
-        best_ask = _safe_float(market.get("bestAsk") or market.get("bestAskPrice"))
-        best_bid = _safe_float(market.get("bestBid") or market.get("bestBidPrice"))
-        if best_ask > 0 and best_bid > 0:
-            mid = (best_ask + best_bid) / 2
-            return "YES" if mid >= 0.50 else "NO"
-    return "YES" if price >= 0.50 else "NO"
+    return "NO" if price > 0.50 else "YES"
 
 
 def _size_position(n_triggers: int) -> tuple[float, float, float, str]:
@@ -118,42 +83,11 @@ def _size_position(n_triggers: int) -> tuple[float, float, float, str]:
     return round(random.uniform(tier["min_usd"], tier["max_usd"]), 2), tier["tp"], tier["sl"], tier["label"]
 
 
-def _is_live(market: dict, now: float) -> bool:
-    """Return True if the game is currently in-play."""
-    # Method 1: explicit eventState field
-    event_state_raw = market.get("eventState")
-    if event_state_raw:
-        if isinstance(event_state_raw, dict):
-            state_str = str(event_state_raw.get("status") or event_state_raw.get("state") or "").upper()
-        else:
-            state_str = str(event_state_raw).upper()
-        if state_str in _LIVE_STATES:
-            return True
-
-    # Method 2: gameStartTime / startTime in the past
-    game_start_raw = (
-        market.get("gameStartTime")
-        or market.get("startTime")
-        or market.get("startDate")
-    )
-    if game_start_raw:
-        start_ts = _parse_ts(game_start_raw)
-        if 0 < start_ts < now:
-            return True
-
-    return False
-
-
 async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSignal | None:
 
     question    = market.get("question") or market.get("title") or ""
     market_id   = market.get("id") or market.get("conditionId") or ""
     market_slug = client.get_market_slug(market)
-
-    # Block intra-game period markets (1Q/2Q/3Q/4Q/1H/2H totals & spreads)
-    if _PERIOD_RE.search(question) or _PERIOD_RE.search(market_slug or ""):
-        logger.debug("SKIP period-market: %s", question[:60])
-        return None
 
     token_id = client.resolve_token_id(market, "YES")
     if not token_id:
@@ -167,12 +101,11 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
 
     vol_24h = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
     if vol_24h > 0 and vol_24h < MIN_VOL_24H:
-        logger.debug("SKIP vol(%.0f): %s", vol_24h, question[:60])
         return None
 
     price = await client.get_market_price(market, token_id)
     if not price:
-        logger.debug("SKIP no-price (token=%s…): %s", str(token_id)[:16], question[:60])
+        logger.debug("SKIP no-price: %s", question[:60])
         return None
 
     if price < MIN_PRICE or price > MAX_PRICE:
@@ -180,55 +113,50 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         return None
 
     triggers: list[str] = []
-    now = time.time()
 
-    # T1: price near 50/50 — genuinely contested market
-    if T1_LOW <= price <= T1_HIGH:
+    if price < T1_LOW or price > T1_HIGH:
         triggers.append(f"T1:prob={price:.2f}")
 
-    # T2: game is currently live — detected via eventState or gameStartTime
-    if _is_live(market, now):
-        triggers.append("T2:live")
+    price_15m = await client.get_price_15min_ago(market, token_id)
+    if price_15m and price_15m > 0:
+        move = abs(price - price_15m) / price_15m
+        if move >= T2_MOVE:
+            triggers.append(f"T2:move={move:.1%}")
 
-    # T3: 24h volume is unusually high relative to historical daily average
     vol_all   = _safe_float(market.get("volume") or market.get("volumeNum"))
     days_est  = max(1.0, _safe_float(market.get("daysAgo"), 7.0))
     daily_avg = vol_all / days_est if vol_all else 0
     if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
 
-    # T4: resolves within 48h — imminent outcome, tighter edge window
     if secs is not None and 0 < secs <= T4_SECS:
-        triggers.append(f"T4:hrs={secs/3600:.0f}h")
+        triggers.append(f"T4:days={secs/86400:.1f}")
 
-    # T5: bookmaker consensus diverges from Polymarket by ≥3% — primary edge signal
+    # T5: bookmaker consensus diverges from Polymarket by ≥ 3% — primary edge signal
     bm_side: str | None = None
-    bm_result = await get_bookmaker_signal(market, price, client._session)
-    if bm_result is not None:
-        bm_edge, bm_side = bm_result
-        triggers.append(f"T5:bm_edge={bm_edge:.2f}")
+    try:
+        bm_result = await get_bookmaker_signal(market, price, client._session)
+        if bm_result is not None:
+            bm_edge, bm_side = bm_result
+            triggers.append(f"T5:bm_edge={bm_edge:.2f}")
+    except Exception as exc:
+        logger.debug("T5 error: %s", exc)
 
     if len(triggers) < 2:
         logger.debug("SKIP triggers=%d (price=%.2f): %s", len(triggers), price, question[:60])
         return None
 
-    # Use bookmaker's side when available — it defines the actual mispricing direction
-    side = bm_side if bm_side else _decide_side(price, market)
-    trade_token = token_id if side == "YES" else (client.resolve_token_id(market, "NO") or token_id)
-
-    if not await client.has_liquidity(trade_token, min_usd=0.10):
-        logger.debug("SKIP no-liquidity: %s", question[:60])
-        return None
-
+    # Bookmaker's side defines the actual mispricing direction when available
+    side               = bm_side if bm_side else _decide_side(price, market)
     amount, tp, sl, label = _size_position(len(triggers))
-    score = min(100, 25 + len(triggers) * 25)
+    score              = min(100, len(triggers) * 25)
 
     signal = TradeSignal(
         market_id   = market_id,
         market_slug = market_slug,
         question    = question,
         side        = side,
-        token_id    = trade_token,
+        token_id    = token_id if side == "YES" else (client.resolve_token_id(market, "NO") or token_id),
         price_now   = price,
         triggers    = triggers,
         score       = score,
@@ -240,7 +168,8 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     )
 
     logger.info(
-        "Signal: %s | %s @ %.2f | slug=%s conviction=%s amount=$%.2f triggers=%s",
-        question[:50], side, price, market_slug or "NO-SLUG", label, amount, triggers,
+        "Signal: %s | %s @ %.2f | slug=%s conviction=%s amount=$%.2f",
+        question[:50], side, price, market_slug or "NO-SLUG", label, amount,
     )
     return signal
+
