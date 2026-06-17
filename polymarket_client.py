@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 
@@ -19,23 +19,11 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
 
 _BLOCKED = {
-    # Politics / macro
     "politics", "election", "president", "congress", "senate",
     "trump", "harris", "biden", "democrat", "republican",
     "war", "conflict", "invasion", "missile", "nato",
     "fed rate", "interest rate", "inflation", "gdp",
-    # Entertainment
     "oscar", "grammy", "emmy", "celebrity", "reality tv",
-    # Motorsport (no bookmaker coverage → no edge signal)
-    "formula 1", "f1", "grand prix", "fastest lap", "nascar", "indycar",
-    "500 winner", "400 winner", "300 winner", "race winner",
-    # Player props (individual stats → high variance, no consensus odds)
-    "rebounds", "assists", "steals",
-    "double-double", "triple-double",
-    "rushing yards", "passing yards", "receiving yards",
-    "strikeout", "home run", "batting average",
-    "goals allowed", "save percentage",
-    "player points", "total points scored by",
 }
 
 
@@ -73,14 +61,24 @@ class PolymarketClient:
             return None
 
     # ---------------------------------------------------------------- #
-    # Market scanning                                                   #
+    # Market scanning — SDK first, Gamma fallback                       #
     # ---------------------------------------------------------------- #
 
     async def get_sports_markets(self, limit=200):
         us_markets = await self._get_us_sdk_markets(limit)
-        allowed = [m for m in us_markets if self._is_allowed(m)]
-        logger.info("Polymarket.US SDK: %d markets, %d allowed", len(us_markets), len(allowed))
-        return allowed
+        if us_markets:
+            allowed = [m for m in us_markets if self._is_allowed(m)]
+            logger.info("Polymarket.US SDK: %d markets, %d allowed", len(us_markets), len(allowed))
+            return allowed
+
+        # Fallback to Gamma API
+        data = await self._get(
+            f"{GAMMA_API}/markets",
+            params={"active": "true", "closed": "false", "limit": limit,
+                    "order": "volume24hr", "ascending": "false"},
+        )
+        markets = data if isinstance(data, list) else (data or {}).get("data", []) if data else []
+        return [m for m in markets if self._is_allowed(m)]
 
     async def _get_us_sdk_markets(self, limit=200) -> list[dict]:
         if not self._us_client:
@@ -116,85 +114,90 @@ class PolymarketClient:
                 else (data or {}).get("data") or (data or {}).get("events") or (data or {}).get("results") or []
             ) if data else []
 
-        def _parse_ts(raw) -> float:
-            if raw is None:
-                return 0.0
-            try:
-                ts = float(raw)
-                if ts > 1_000_000_000:
-                    return ts
-            except (TypeError, ValueError):
-                pass
-            s = str(raw).strip()
-            try:
-                if "T" in s or len(s) > 10:
-                    return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
-                return datetime.fromisoformat(s + "T23:59:59+00:00").timestamp()
-            except Exception:
-                return 0.0
+        now_ts = time.time()
 
-        def _fmt_ts(ts: float) -> str:
-            if ts <= 0:
-                return "no-date"
-            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        def _upcoming_in(markets):
+            for m in markets:
+                gst = m.get("gameStartTime")
+                if not gst:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(str(gst).replace("Z", "+00:00")).timestamp()
+                    if ts > now_ts:
+                        return True
+                except Exception:
+                    pass
+            return False
 
-        async def _fetch_page(params: dict) -> list[dict]:
+        async def _fetch_page(off: int) -> list:
+            o = off
             data = await loop.run_in_executor(
                 None,
-                lambda p=params: self._us_client.events.list(p),
+                lambda: self._us_client.events.list({
+                    "limit": 200,
+                    "active": True,
+                    "offset": o,
+                }),
             )
-            return _build_markets(_extract_events(data))
+            return _extract_events(data)
 
         try:
-            if self._upcoming_offset > 0:
-                start_offset = max(0, self._upcoming_offset - 2000)
-                logger.info("Resuming from cached end offset %d (start=%d)",
-                            self._upcoming_offset, start_offset)
-            else:
-                start_offset = 13000
-
             all_markets: list[dict] = []
-            for offset in range(start_offset, start_offset + 6000, 200):
-                try:
-                    page = await _fetch_page({"limit": 200, "offset": offset})
-                except Exception as exc:
-                    logger.debug("Offset %d failed: %s", offset, exc)
-                    continue
-                if not page:
-                    logger.info("Pagination ended at offset %d — caching", offset)
-                    self._upcoming_offset = offset
+
+            start_offset = max(0, self._upcoming_offset - 200)
+            if start_offset > 0:
+                logger.info("Jumping to cached offset %d to find upcoming games", start_offset)
+
+            found = False
+            offset = start_offset
+            max_offset = start_offset + 2000
+
+            while offset <= max_offset:
+                page_events = await _fetch_page(offset)
+                if not page_events:
+                    logger.info("Pagination stopped at offset %d — no more events", offset)
                     break
-                dates = sorted(_parse_ts(m.get("resolutionTime") or m.get("gameStartTime") or "")
-                               for m in page)
-                dates = [d for d in dates if d > 0]
-                rng   = f"{_fmt_ts(dates[0])} → {_fmt_ts(dates[-1])}" if dates else "no dates"
-                logger.info("Offset %d: %d events, dates %s", offset, len(page), rng)
-                all_markets.extend(page)
+                page_markets = _build_markets(page_events)
+                all_markets.extend(page_markets)
+                if offset == start_offset and page_events:
+                    logger.info("SDK page offset=%d: %d events, sample keys: %s",
+                                offset, len(page_events), list(page_events[0].keys()))
+                else:
+                    logger.info("Paginated offset=%d: +%d markets (%d total)",
+                                offset, len(page_markets), len(all_markets))
+                if _upcoming_in(page_markets):
+                    logger.info("Found upcoming games at offset %d — caching", offset)
+                    self._upcoming_offset = offset
+                    found = True
+                    for extra_off in range(offset + 200, offset + 800, 200):
+                        extra_events = await _fetch_page(extra_off)
+                        if not extra_events:
+                            break
+                        all_markets.extend(_build_markets(extra_events))
+                    break
+                offset += 200
 
-            if all_markets and self._upcoming_offset == 0:
-                sample = all_markets[-1]
-                logger.info("Sample event fields: %s", {
-                    k: sample.get(k) for k in (
-                        "question", "slug", "active", "eventState",
-                        "resolutionTime", "gameStartTime", "closeTime",
-                    )
-                })
+            if not found:
+                if start_offset > 0:
+                    logger.warning("No upcoming games at cached offset %d — resetting cache", start_offset)
+                    self._upcoming_offset = 0
+                else:
+                    logger.warning("Pagination exhausted to offset %d — no upcoming games found", offset)
 
-            logger.info("Fetched %d recent markets from offset %d onwards",
-                        len(all_markets), start_offset)
+            game_times = sorted(set(
+                m.get("gameStartTime", "")[:10]
+                for m in all_markets if m.get("gameStartTime")
+            ))
+            logger.info("gameStartTime latest dates across %d markets: %s",
+                        len(all_markets), game_times[-10:])
             return all_markets
-
         except Exception as exc:
-            logger.warning("US SDK events.list failed: %s", exc)
+            logger.warning("US SDK events.list failed: %s — falling back to Gamma API", exc)
             return []
 
     def _is_allowed(self, market):
         if not market.get("active", True) or market.get("closed", False):
             logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
-            return False
-        secs = self.seconds_to_resolution(market)
-        if secs is not None and secs <= 0:
-            logger.debug("BLOCKED resolved(%.1fd ago): %s", abs(secs) / 86400, (market.get("question") or "")[:60])
             return False
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
@@ -263,28 +266,6 @@ class PolymarketClient:
                 pass
         return None
 
-    async def has_liquidity(self, token_id: str, min_usd: float = 0.10) -> bool:
-        tid = str(token_id)
-        if len(tid) < 32 or not tid.replace("-", "").isalnum():
-            return True
-        book = await self._get(f"{CLOB_API}/book", params={"token_id": token_id})
-        if not book:
-            return True
-        bids = book.get("bids") or []
-        asks = book.get("asks") or []
-        if not bids or not asks:
-            logger.debug("Empty CLOB book for token %s… — assuming US liquidity", tid[:12])
-            return True
-        ask_depth = sum(float(a.get("size", 0)) for a in asks[:3])
-        bid_depth = sum(float(b.get("size", 0)) for b in bids[:3])
-        if ask_depth < min_usd or bid_depth < min_usd:
-            logger.debug(
-                "Thin CLOB book for token %s… ask=%.2f bid=%.2f",
-                tid[:12], ask_depth, bid_depth,
-            )
-            return False
-        return True
-
     # ---------------------------------------------------------------- #
     # Account                                                           #
     # ---------------------------------------------------------------- #
@@ -315,29 +296,23 @@ class PolymarketClient:
         loop = asyncio.get_event_loop()
         try:
             data = await loop.run_in_executor(None, self._us_client.portfolio.positions)
-            logger.info("get_open_positions raw: type=%s value=%s",
-                        type(data).__name__, str(data)[:600])
+            if not data:
+                return []
             if isinstance(data, list):
                 return data
-            if isinstance(data, dict):
-                positions_val = data.get("positions")
-                # API returns positions as a dict keyed by market slug
-                if isinstance(positions_val, dict) and positions_val:
-                    result = []
-                    for slug, pos in positions_val.items():
-                        if isinstance(pos, dict):
-                            entry = {**pos}
-                            entry["slug"]       = entry.get("slug") or slug
-                            entry["marketSlug"] = entry.get("marketSlug") or slug
-                            result.append(entry)
-                    logger.info("get_open_positions: converted %d positions from slug-keyed dict", len(result))
-                    return result
-                if isinstance(positions_val, list):
-                    return positions_val
-                logger.warning("get_open_positions: no usable positions — keys: %s", list(data.keys()))
+            positions = data.get("positions", {})
+            if isinstance(positions, dict):
+                result = []
+                for slug, pos in positions.items():
+                    if isinstance(pos, dict):
+                        pos.setdefault("marketSlug", slug)
+                        result.append(pos)
+                logger.info("get_open_positions: %d positions from portfolio", len(result))
+                return result
+            return positions if isinstance(positions, list) else []
         except Exception as exc:
-            logger.warning("get_open_positions failed: %s", exc)
-        return []
+            logger.debug("get_open_positions failed: %s", exc)
+            return []
 
     # ---------------------------------------------------------------- #
     # Order placement                                                   #
@@ -365,14 +340,13 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, amount_usd: float
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
-        intent     = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
-        fill_price = min(0.97, round(price + 0.03, 4))
-        quantity   = max(1, round(amount_usd / fill_price))
+        intent   = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
+        quantity = max(1, round(amount_usd / price))
         order = {
             "marketSlug": market_slug,
             "intent":     intent,
             "type":       "ORDER_TYPE_LIMIT",
-            "price":      {"value": str(fill_price), "currency": "USD"},
+            "price":      {"value": str(round(price, 4)), "currency": "USD"},
             "quantity":   quantity,
             "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
         }
@@ -394,52 +368,8 @@ class PolymarketClient:
     async def close_position(
         self, market_slug: str, side: str, price: float, size_usd: float
     ) -> dict | None:
-        if not self._us_client:
-            logger.error("Polymarket.US client not initialised — cannot close position")
-            return None
-        loop = asyncio.get_event_loop()
-        try:
-            return await loop.run_in_executor(
-                None, self._sync_close_position, market_slug, side, price, size_usd
-            )
-        except Exception as exc:
-            logger.error("close_position failed for %s: %s", market_slug, exc)
-            return None
-
-    def _sync_close_position(
-        self, market_slug: str, side: str, price: float, size_usd: float
-    ) -> dict | None:
-        from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
-        quantity = max(1, round(size_usd / price))
-
-        for intent in (
-            "ORDER_INTENT_SELL_LONG" if side == "YES" else "ORDER_INTENT_SELL_SHORT",
-            "ORDER_INTENT_BUY_SHORT" if side == "YES" else "ORDER_INTENT_BUY_LONG",
-        ):
-            order = {
-                "marketSlug": market_slug,
-                "intent":     intent,
-                "type":       "ORDER_TYPE_LIMIT",
-                "price":      {"value": str(round(price, 4)), "currency": "USD"},
-                "quantity":   quantity,
-                "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
-            }
-            logger.info("Closing position (intent=%s): %s", intent, order)
-            try:
-                resp = self._us_client.orders.create(order)
-                logger.info("Close response: %s", resp)
-                return resp
-            except BadRequestError as exc:
-                logger.warning("Close intent %s rejected for %s: %s — trying fallback", intent, market_slug, exc)
-            except AuthenticationError as exc:
-                logger.error("Auth error closing %s: %s", market_slug, exc)
-                return None
-            except NotFoundError as exc:
-                logger.error("Market not found closing %s: %s", market_slug, exc)
-                return None
-            except Exception as exc:
-                logger.error("Close order error for %s (intent=%s): %s", market_slug, intent, exc)
-        return None
+        close_side = "NO" if side == "YES" else "YES"
+        return await self.place_market_order(market_slug, close_side, price, size_usd)
 
     # ---------------------------------------------------------------- #
     # Helpers                                                           #
@@ -466,6 +396,7 @@ class PolymarketClient:
     async def get_market_price(self, market: dict, token_id: str) -> float | None:
         question = (market.get("question") or "")[:40]
 
+        # outcomePrices — skip if values are 0/1 (binary markers, not probabilities)
         op = market.get("outcomePrices")
         if op:
             try:
@@ -476,6 +407,7 @@ class PolymarketClient:
             except Exception:
                 pass
 
+        # marketSides — list of {side, price/probability} dicts
         sides = market.get("marketSides") or []
         logger.debug("marketSides for '%s': %r", question, sides)
         if sides:
@@ -505,6 +437,7 @@ class PolymarketClient:
             except Exception as exc:
                 logger.info("marketSides parse error: %s", exc)
 
+        # outcomes — list or dict
         outcomes = market.get("outcomes") or []
         logger.debug("outcomes for '%s': %r", question, outcomes)
         if outcomes:
@@ -573,20 +506,18 @@ class PolymarketClient:
             if not raw:
                 return None
             try:
-                game_ts = (float(raw) if isinstance(raw, (int, float))
-                           else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp())
+                if isinstance(raw, (int, float)):
+                    game_ts = float(raw)
+                else:
+                    game_ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
                 return (game_ts + 4 * 3600) - time.time()
             except Exception:
                 return None
         try:
-            if isinstance(raw, (int, float)):
-                end_ts = float(raw)
-            else:
-                s = str(raw).strip()
-                if "T" in s or len(s) > 10:
-                    end_ts = datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
-                else:
-                    end_ts = datetime.fromisoformat(s + "T23:59:59+00:00").timestamp()
+            end_ts = (
+                float(raw) if isinstance(raw, (int, float))
+                else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+            )
             return end_ts - time.time()
         except Exception:
             return None
