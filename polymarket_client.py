@@ -19,11 +19,23 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
 
 _BLOCKED = {
+    # Non-sports / politics
     "politics", "election", "president", "congress", "senate",
     "trump", "harris", "biden", "democrat", "republican",
     "war", "conflict", "invasion", "missile", "nato",
     "fed rate", "interest rate", "inflation", "gdp",
     "oscar", "grammy", "emmy", "celebrity", "reality tv",
+    # Game segments — only trade full-game markets
+    "first half", "second half", "1st half", "2nd half", "halftime", "half time",
+    "first quarter", "second quarter", "third quarter", "fourth quarter",
+    "1st quarter", "2nd quarter", "3rd quarter", "4th quarter",
+    "first period", "second period", "third period",
+    # Player props — individual stat lines, not game outcomes
+    "rushing yards", "passing yards", "receiving yards",
+    "total rebounds", "total assists",
+    "strikeouts", "home runs", "hits and runs",
+    "anytime scorer", "first scorer", "last scorer",
+    "to score 2+", "to score 3+", "to record",
 }
 
 
@@ -538,4 +550,3 @@ class PolymarketClient:
             return f"https://polymarket.us/event/{slug}"
         mid = market.get("id") or ""
         return f"https://polymarket.us/event/{mid}" if mid else "https://polymarket.us"
-
