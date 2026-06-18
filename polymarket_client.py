@@ -52,7 +52,7 @@ class PolymarketClient:
         self._us_client  = self._init_us_client()
         self._market_cache: dict = {}
         self._slug_map: dict[str, str] = {}
-        self._upcoming_offset: int = 0
+        self._upcoming_offset: int = self._load_offset_cache()
         logger.info("PolymarketClient ready — key_id %s…", self._key_id[:8])
 
     def _init_us_client(self):
@@ -67,6 +67,29 @@ class PolymarketClient:
         except Exception as exc:
             logger.error("Failed to init Polymarket.US client: %s", exc)
             return None
+
+    _OFFSET_CACHE_FILE = "upcoming_offset.json"
+
+    def _load_offset_cache(self) -> int:
+        try:
+            import json, pathlib
+            p = pathlib.Path(self._OFFSET_CACHE_FILE)
+            if p.exists():
+                val = json.loads(p.read_text()).get("upcoming_offset", 0)
+                logger.info("Loaded cached upcoming_offset=%d", val)
+                return int(val)
+        except Exception:
+            pass
+        return 0
+
+    def _save_offset_cache(self, offset: int) -> None:
+        try:
+            import json, pathlib
+            pathlib.Path(self._OFFSET_CACHE_FILE).write_text(
+                json.dumps({"upcoming_offset": offset})
+            )
+        except Exception:
+            pass
 
     async def _get(self, url, params=None):
         try:
@@ -174,7 +197,7 @@ class PolymarketClient:
 
             found = False
             offset = start_offset
-            max_offset = start_offset + 2000
+            max_offset = start_offset + 10000
 
             while offset <= max_offset:
                 page_events = await _fetch_page(offset)
@@ -192,6 +215,7 @@ class PolymarketClient:
                 if _upcoming_in(page_markets):
                     logger.info("Found upcoming games at offset %d — caching", offset)
                     self._upcoming_offset = offset
+                    self._save_offset_cache(offset)
                     found = True
                     for extra_off in range(offset + 200, offset + 800, 200):
                         extra_events = await _fetch_page(extra_off)
@@ -205,6 +229,7 @@ class PolymarketClient:
                 if start_offset > 0:
                     logger.warning("No upcoming games at cached offset %d — resetting cache", start_offset)
                     self._upcoming_offset = 0
+                    self._save_offset_cache(0)
                 else:
                     logger.warning("Pagination exhausted to offset %d — no upcoming games found", offset)
 
@@ -241,7 +266,6 @@ class PolymarketClient:
         ])
         for kw in _BLOCKED:
             if kw in text:
-                logger.debug("BLOCKED keyword '%s': %s", kw, text[:80])
                 return False
         return True
 
