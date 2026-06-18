@@ -4,10 +4,10 @@ Trigger evaluation and trade decision logic.
 Pre-filters (all must pass):
   - Price between 0.05 and 0.95
   - Minimum $200 24h volume
-  - Resolution time must be known and within 2 days
+  - Resolution time must be known and within 3 days
 
 Requires 3+ triggers to fire a trade:
-  T1  Price outside 30-70% range (strong mispricing)
+  T1  Price outside 35-65% range (mispricing signal)
   T2  Price moved >= 2% in last 15 min (significant momentum)
   T3  24h volume > 2x daily average (unusual activity)
   T5  Bookmaker consensus >= 3% edge over Polymarket price
@@ -38,11 +38,11 @@ logger = logging.getLogger(__name__)
 MIN_PRICE    = 0.05
 MAX_PRICE    = 0.95
 MIN_VOL_24H  = 200.0
-MAX_DAYS_OUT = 2 * 86_400
+MAX_DAYS_OUT = 3 * 86_400
 MIN_TRIGGERS = 3
 
-T1_LOW  = 0.30
-T1_HIGH = 0.70
+T1_LOW  = 0.35
+T1_HIGH = 0.65
 T2_MOVE = 0.02
 T3_MULT = 2.0
 T4_SECS = 7 * 86_400
