@@ -112,6 +112,10 @@ async def scan_markets(
     signals_fired = 0
 
     for market in markets:
+        if os.getenv("PAUSED", "false").lower() == "true":
+            logger.info("Bot paused mid-scan — stopping")
+            return
+
         mid = market.get("id") or market.get("conditionId") or ""
         if mid in _traded_this_session:
             continue
@@ -284,4 +288,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
