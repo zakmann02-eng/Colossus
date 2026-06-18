@@ -151,6 +151,13 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         logger.debug("SKIP triggers=%d (price=%.2f): %s", len(triggers), price, question[:60])
         return None
 
+    # Must have at least one directional signal — T1 (price bias) or T5 (bookmaker edge).
+    # T2/T3/T4 alone only confirm activity, not which side to bet.
+    has_directional = any(t.startswith("T1:") or t.startswith("T5:") for t in triggers)
+    if not has_directional:
+        logger.debug("SKIP no-directional (T1/T5 absent): %s", question[:60])
+        return None
+
     # Bookmaker's side defines the actual mispricing direction when available
     side               = bm_side if bm_side else _decide_side(price, market)
     amount, tp, sl, label = _size_position(len(triggers))
@@ -177,3 +184,4 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         question[:50], side, price, market_slug or "NO-SLUG", label, amount,
     )
     return signal
+
