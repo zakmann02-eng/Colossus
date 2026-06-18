@@ -70,6 +70,7 @@ MAX_TRADE_USD = float(os.getenv("MAX_TRADE_USD",   "1.00"))
 TP_PCT        = float(os.getenv("TAKE_PROFIT_PCT", "20.0")) / 100
 SL_PCT        = float(os.getenv("STOP_LOSS_PCT",   "8.0"))  / 100
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL",     "60"))
+MAX_TRADES_SESSION = int(os.getenv("MAX_TRADES_SESSION", "5"))
 
 _traded_this_session: set[str] = set()
 _traded_events_this_session: set[str] = set()
@@ -110,6 +111,10 @@ async def scan_markets(
     # Re-key any synced positions from slug to real CLOB token ID so price lookups work
     position_mgr.update_token_ids_from_markets(markets, client)
 
+    if len(_traded_this_session) >= MAX_TRADES_SESSION:
+        logger.info("Session trade cap reached (%d) — skipping scan", MAX_TRADES_SESSION)
+        return
+
     signals_fired = 0
 
     for market in markets:
@@ -137,6 +142,10 @@ async def scan_markets(
 
         if os.getenv("PAUSED", "false").lower() == "true":
             logger.info("Bot paused before order — skipping")
+            return
+
+        if len(_traded_this_session) >= MAX_TRADES_SESSION:
+            logger.info("Session trade cap reached (%d) — stopping scan", MAX_TRADES_SESSION)
             return
 
         balance = await client.get_balance()
@@ -217,7 +226,7 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     os.environ["PAUSED"] = "true"
-    await update.message.reply_text("⏸ Bot paused. No new orders will be placed.")
+    await update.message.reply_text("⏸ Bot paused.")
 
 
 async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -300,4 +309,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
