@@ -10,8 +10,11 @@ Requires 3+ triggers to fire a trade:
   T1  Price outside 30-70% range (strong mispricing)
   T2  Price moved >= 2% in last 15 min (significant momentum)
   T3  24h volume > 2x daily average (unusual activity)
-  T4  Resolves within 7 days
   T5  Bookmaker consensus >= 3% edge over Polymarket price
+
+  Note: T4 (resolves within 7 days) is a pre-filter only — it no longer
+  counts toward the trigger threshold because it fires on every eligible
+  market, adding no discriminating signal value.
 
 Position sizing by triggers fired:
   3 triggers → MED  → $0.35–$0.65 · TP 20% · SL 8%
@@ -134,9 +137,6 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
 
-    if secs is not None and 0 < secs <= T4_SECS:
-        triggers.append(f"T4:days={secs/86400:.1f}")
-
     # T5: bookmaker consensus diverges from Polymarket by >= 3% — primary edge signal
     bm_side: str | None = None
     try:
@@ -152,7 +152,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         return None
 
     # Must have at least one directional signal — T1 (price bias) or T5 (bookmaker edge).
-    # T2/T3/T4 alone only confirm activity, not which side to bet.
+    # T2/T3 alone only confirm activity, not which side to bet.
     has_directional = any(t.startswith("T1:") or t.startswith("T5:") for t in triggers)
     if not has_directional:
         logger.debug("SKIP no-directional (T1/T5 absent): %s", question[:60])
@@ -184,4 +184,3 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         question[:50], side, price, market_slug or "NO-SLUG", label, amount,
     )
     return signal
-
