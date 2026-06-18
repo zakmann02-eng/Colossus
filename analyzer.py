@@ -11,7 +11,7 @@ Requires 2+ triggers to fire a trade:
   T2  Price moved >= 1% in last 15 min
   T3  24h volume > 1.5x daily average
   T4  Resolves within 7 days
-  T5  Bookmaker consensus ≥ 3% edge over Polymarket price
+  T5  Bookmaker consensus >= 3% edge over Polymarket price
 
 Position sizing by triggers fired:
   2 triggers → MED  → $0.35–$0.65 · TP 20% · SL 8%
@@ -132,7 +132,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     if secs is not None and 0 < secs <= T4_SECS:
         triggers.append(f"T4:days={secs/86400:.1f}")
 
-    # T5: bookmaker consensus diverges from Polymarket by ≥ 3% — primary edge signal
+    # T5: bookmaker consensus diverges from Polymarket by >= 3% — primary edge signal
     bm_side: str | None = None
     try:
         bm_result = await get_bookmaker_signal(market, price, client._session)
@@ -172,4 +172,3 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         question[:50], side, price, market_slug or "NO-SLUG", label, amount,
     )
     return signal
-
