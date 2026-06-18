@@ -99,7 +99,10 @@ class PolymarketClient:
                         row["eventSlug"]      = event_slug
                         row["question"]       = m.get("question") or m.get("title") or event.get("title") or ""
                         row["volume24hr"]     = event.get("volume24hr") or m.get("volume24hr") or 0
-                        row["resolutionTime"] = m.get("resolutionTime") or event.get("resolutionTime") or ""
+                        row["resolutionTime"] = (
+                            m.get("resolutionTime") or m.get("endDate") or m.get("closeTime") or
+                            event.get("resolutionTime") or event.get("endDate") or ""
+                        )
                         row["eventState"]     = event.get("eventState") or ""
                         markets.append(row)
                 else:
@@ -118,15 +121,19 @@ class PolymarketClient:
 
         def _upcoming_in(markets):
             for m in markets:
-                gst = m.get("gameStartTime")
-                if not gst:
-                    continue
-                try:
-                    ts = datetime.fromisoformat(str(gst).replace("Z", "+00:00")).timestamp()
-                    if ts > now_ts:
-                        return True
-                except Exception:
-                    pass
+                for field in ("gameStartTime", "startDate", "endDate", "startTime"):
+                    raw = m.get(field)
+                    if not raw:
+                        continue
+                    try:
+                        if isinstance(raw, (int, float)):
+                            ts = float(raw)
+                        else:
+                            ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+                        if ts > now_ts:
+                            return True
+                    except Exception:
+                        pass
             return False
 
         async def _fetch_page(off: int) -> list:
@@ -502,16 +509,19 @@ class PolymarketClient:
     def seconds_to_resolution(self, market):
         raw = market.get("resolutionTime") or market.get("closeTime")
         if not raw:
-            raw = market.get("gameStartTime")
+            game_raw = market.get("gameStartTime")
+            if game_raw:
+                try:
+                    if isinstance(game_raw, (int, float)):
+                        game_ts = float(game_raw)
+                    else:
+                        game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
+                    return (game_ts + 4 * 3600) - time.time()
+                except Exception:
+                    return None
+            # Fall back to endDate/startDate — common in Polymarket.US events
+            raw = market.get("endDate") or market.get("startDate")
             if not raw:
-                return None
-            try:
-                if isinstance(raw, (int, float)):
-                    game_ts = float(raw)
-                else:
-                    game_ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
-                return (game_ts + 4 * 3600) - time.time()
-            except Exception:
                 return None
         try:
             end_ts = (
@@ -528,3 +538,4 @@ class PolymarketClient:
             return f"https://polymarket.us/event/{slug}"
         mid = market.get("id") or ""
         return f"https://polymarket.us/event/{mid}" if mid else "https://polymarket.us"
+
