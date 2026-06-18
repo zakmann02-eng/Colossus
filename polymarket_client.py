@@ -36,12 +36,17 @@ _BLOCKED = {
     "strikeouts", "home runs", "hits and runs",
     "anytime scorer", "first scorer", "last scorer",
     "to score 2+", "to score 3+", "to record",
+    # Over/under totals — block decimal line markets (e.g. "Under 2.5", "Over 1.5 goals")
+    "over 0.", "over 1.", "over 2.", "over 3.", "over 4.", "over 5.",
+    "under 0.", "under 1.", "under 2.", "under 3.", "under 4.", "under 5.",
+    "total goals", "total runs", "total sets", "total games",
 }
 
 
 class PolymarketClient:
     def __init__(self, session, key_id: str, secret_key: str) -> None:
         self._s          = session
+        self._session    = session
         self._key_id     = key_id.strip()
         self._secret_key = secret_key.strip()
         self._us_client  = self._init_us_client()
@@ -550,3 +555,4 @@ class PolymarketClient:
             return f"https://polymarket.us/event/{slug}"
         mid = market.get("id") or ""
         return f"https://polymarket.us/event/{mid}" if mid else "https://polymarket.us"
+
