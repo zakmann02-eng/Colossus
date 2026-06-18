@@ -108,10 +108,6 @@ def _american_to_prob(odds: int) -> float:
 
 
 def _extract_consensus_prob(outcomes: list[dict], target: str) -> float | None:
-    """
-    Average implied probability across all bookmakers for the given outcome name.
-    target is matched case-insensitively anywhere in the outcome name.
-    """
     target_l = target.lower()
     probs: list[float] = []
     for outcome in outcomes:
@@ -172,10 +168,6 @@ async def _fetch_sport_events(sport_key: str, session: aiohttp.ClientSession) ->
 
 
 def _find_matching_event(events: list[dict], question: str) -> dict | None:
-    """
-    Try to match a Polymarket question to an Odds API event.
-    Looks for team/player name overlap.
-    """
     q = question.lower()
     best: dict | None = None
     best_score = 0
@@ -188,7 +180,6 @@ def _find_matching_event(events: list[dict], question: str) -> dict | None:
             score += 2
         if away and away in q:
             score += 2
-        # Partial word match
         for part in home.split():
             if len(part) > 3 and part in q:
                 score += 1
@@ -237,7 +228,6 @@ async def get_bookmaker_signal(
         logger.debug("Odds API: no event match for: %s", question[:60])
         return None
 
-    # Determine which team/player the Polymarket question is asking about
     home = event.get("home_team") or ""
     away = event.get("away_team") or ""
     q_lower = question.lower()
@@ -251,7 +241,6 @@ async def get_bookmaker_signal(
     if not target_team:
         return None
 
-    # Collect all outcome prices across bookmakers
     all_outcomes: list[dict] = []
     for bm in event.get("bookmakers", []):
         for mkt in bm.get("markets", []):
@@ -263,7 +252,6 @@ async def get_bookmaker_signal(
         logger.debug("Odds API: no odds for %s in event %s", target_team, event.get("id"))
         return None
 
-    # Vig-normalise: collect raw implied probs for all outcomes in this event
     all_team_probs: list[float] = []
     for outcome in all_outcomes:
         price = outcome.get("price")
