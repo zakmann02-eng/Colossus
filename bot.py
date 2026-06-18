@@ -129,6 +129,10 @@ async def scan_markets(
         if signal is None:
             continue
 
+        if os.getenv("PAUSED", "false").lower() == "true":
+            logger.info("Bot paused before order — skipping")
+            return
+
         balance = await client.get_balance()
         if balance < signal.amount_usd:
             logger.info("Insufficient balance ($%.2f) for $%.2f trade — stopping", balance, signal.amount_usd)
@@ -205,7 +209,7 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     os.environ["PAUSED"] = "true"
-    await update.message.reply_text("⏸ Bot paused.")
+    await update.message.reply_text("⏸ Bot paused. No new orders will be placed.")
 
 
 async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -288,3 +292,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
