@@ -4,7 +4,7 @@ Trigger evaluation and trade decision logic.
 Pre-filters (all must pass):
   - Price between 0.05 and 0.95
   - Minimum $200 24h volume
-  - Resolution time must be known and within 7 days
+  - Resolution time must be known and within 2 days
 
 Requires 3+ triggers to fire a trade:
   T1  Price outside 30-70% range (strong mispricing)
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 MIN_PRICE    = 0.05
 MAX_PRICE    = 0.95
 MIN_VOL_24H  = 200.0
-MAX_DAYS_OUT = 7 * 86_400
+MAX_DAYS_OUT = 2 * 86_400
 MIN_TRIGGERS = 3
 
 T1_LOW  = 0.30
@@ -152,7 +152,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         return None
 
     # Must have at least one directional signal — T1 (price bias) or T5 (bookmaker edge).
-    # T2/T3 alone only confirm activity, not which side to bet.
+    # T2/T3/T4 alone only confirm activity, not which side to bet.
     has_directional = any(t.startswith("T1:") or t.startswith("T5:") for t in triggers)
     if not has_directional:
         logger.debug("SKIP no-directional (T1/T5 absent): %s", question[:60])
