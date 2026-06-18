@@ -221,7 +221,6 @@ class PolymarketClient:
 
     def _is_allowed(self, market):
         if not market.get("active", True) or market.get("closed", False):
-            logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
@@ -271,21 +270,14 @@ class PolymarketClient:
             return None
 
     async def get_current_price(self, token_id):
+        # Only use last-trade-price — bid/ask midpoint defaults to 0.5 on thin books
+        # and causes phantom TP triggers.
         data = await self._get(f"{CLOB_API}/last-trade-price", params={"token_id": token_id})
         if data:
             try:
-                return float(data.get("price") or 0) or None
-            except Exception:
-                pass
-        book = await self._get(f"{CLOB_API}/book", params={"token_id": token_id})
-        if book:
-            try:
-                bids     = book.get("bids") or []
-                asks     = book.get("asks") or []
-                best_bid = float(bids[0]["price"]) if bids else 0
-                best_ask = float(asks[0]["price"]) if asks else 0
-                if best_bid and best_ask:
-                    return (best_bid + best_ask) / 2
+                p = float(data.get("price") or 0)
+                if 0.01 < p < 0.99:
+                    return p
             except Exception:
                 pass
         return None
@@ -420,7 +412,6 @@ class PolymarketClient:
     async def get_market_price(self, market: dict, token_id: str) -> float | None:
         question = (market.get("question") or "")[:40]
 
-        # outcomePrices — skip if values are 0/1 (binary markers, not probabilities)
         op = market.get("outcomePrices")
         if op:
             try:
@@ -431,9 +422,7 @@ class PolymarketClient:
             except Exception:
                 pass
 
-        # marketSides — list of {side, price/probability} dicts
         sides = market.get("marketSides") or []
-        logger.debug("marketSides for '%s': %r", question, sides)
         if sides:
             try:
                 if isinstance(sides, str):
@@ -461,9 +450,7 @@ class PolymarketClient:
             except Exception as exc:
                 logger.info("marketSides parse error: %s", exc)
 
-        # outcomes — list or dict
         outcomes = market.get("outcomes") or []
-        logger.debug("outcomes for '%s': %r", question, outcomes)
         if outcomes:
             try:
                 if isinstance(outcomes, str):
@@ -496,7 +483,6 @@ class PolymarketClient:
         if token_id and len(str(token_id)) >= 32 and str(token_id).replace("-", "").isalnum():
             return await self.get_current_price(token_id)
 
-        logger.debug("no-price fields for '%s': marketSides=%r outcomes=%r op=%r", question, sides, outcomes, op)
         return None
 
     def get_market_slug(self, market: dict) -> str:
@@ -536,7 +522,6 @@ class PolymarketClient:
                     return (game_ts + 4 * 3600) - time.time()
                 except Exception:
                     return None
-            # Fall back to endDate/startDate — common in Polymarket.US events
             raw = market.get("endDate") or market.get("startDate")
             if not raw:
                 return None
@@ -555,4 +540,3 @@ class PolymarketClient:
             return f"https://polymarket.us/event/{slug}"
         mid = market.get("id") or ""
         return f"https://polymarket.us/event/{mid}" if mid else "https://polymarket.us"
-
