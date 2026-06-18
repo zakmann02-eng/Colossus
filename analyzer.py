@@ -4,18 +4,18 @@ Trigger evaluation and trade decision logic.
 Pre-filters (all must pass):
   - Price between 0.05 and 0.95
   - Minimum $200 24h volume
-  - Must resolve within 7 days (weekly/daily trading)
+  - Resolution time must be known and within 7 days
 
-Requires 2+ triggers to fire a trade:
-  T1  Price outside 40-60% range (mispriced market)
-  T2  Price moved >= 1% in last 15 min
-  T3  24h volume > 1.5x daily average
+Requires 3+ triggers to fire a trade:
+  T1  Price outside 30-70% range (strong mispricing)
+  T2  Price moved >= 2% in last 15 min (significant momentum)
+  T3  24h volume > 2x daily average (unusual activity)
   T4  Resolves within 7 days
   T5  Bookmaker consensus >= 3% edge over Polymarket price
 
 Position sizing by triggers fired:
-  2 triggers → MED  → $0.35–$0.65 · TP 20% · SL 8%
-  3+ triggers→ HIGH → $0.65–$1.00 · TP 25% · SL 10%
+  3 triggers → MED  → $0.35–$0.65 · TP 20% · SL 8%
+  4+ triggers→ HIGH → $0.65–$1.00 · TP 25% · SL 10%
 """
 
 from __future__ import annotations
@@ -36,17 +36,18 @@ MIN_PRICE    = 0.05
 MAX_PRICE    = 0.95
 MIN_VOL_24H  = 200.0
 MAX_DAYS_OUT = 7 * 86_400
+MIN_TRIGGERS = 3
 
-T1_LOW  = 0.40
-T1_HIGH = 0.60
-T2_MOVE = 0.01
-T3_MULT = 1.5
+T1_LOW  = 0.30
+T1_HIGH = 0.70
+T2_MOVE = 0.02
+T3_MULT = 2.0
 T4_SECS = 7 * 86_400
 T5_MIN_EDGE = 0.03
 
 _TIERS = {
-    2: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.20, "sl": 0.08},
-    3: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.25, "sl": 0.10},
+    3: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.20, "sl": 0.08},
+    4: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.25, "sl": 0.10},
 }
 
 
@@ -79,7 +80,7 @@ def _decide_side(price: float, market: dict | None = None) -> str:
 
 
 def _size_position(n_triggers: int) -> tuple[float, float, float, str]:
-    tier = _TIERS.get(n_triggers) or _TIERS[3]
+    tier = _TIERS.get(n_triggers) or _TIERS[max(_TIERS)]
     return round(random.uniform(tier["min_usd"], tier["max_usd"]), 2), tier["tp"], tier["sl"], tier["label"]
 
 
@@ -95,12 +96,16 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         return None
 
     secs = client.seconds_to_resolution(market)
-    if secs is not None and (secs <= 0 or secs > MAX_DAYS_OUT):
+    if secs is None:
+        logger.debug("SKIP no-date: %s", question[:60])
+        return None
+    if secs <= 0 or secs > MAX_DAYS_OUT:
         logger.debug("SKIP time(%.1fd): %s", secs / 86400, question[:60])
         return None
 
     vol_24h = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
-    if vol_24h > 0 and vol_24h < MIN_VOL_24H:
+    if vol_24h < MIN_VOL_24H:
+        logger.debug("SKIP vol(%.0f): %s", vol_24h, question[:60])
         return None
 
     price = await client.get_market_price(market, token_id)
@@ -142,7 +147,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     except Exception as exc:
         logger.debug("T5 error: %s", exc)
 
-    if len(triggers) < 2:
+    if len(triggers) < MIN_TRIGGERS:
         logger.debug("SKIP triggers=%d (price=%.2f): %s", len(triggers), price, question[:60])
         return None
 
