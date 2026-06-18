@@ -160,8 +160,10 @@ class PolymarketClient:
         now_ts = time.time()
 
         def _upcoming_in(markets):
+            # Only count a page as "upcoming" if a game hasn't started yet.
+            # Checking endDate alone catches resolved-but-not-closed markets from months ago.
             for m in markets:
-                for field in ("gameStartTime", "startDate", "endDate", "startTime"):
+                for field in ("gameStartTime", "startDate", "startTime"):
                     raw = m.get(field)
                     if not raw:
                         continue
