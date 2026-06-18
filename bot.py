@@ -106,6 +106,9 @@ async def scan_markets(
     markets = await client.get_sports_markets(limit=100)
     logger.info("Found %d eligible markets", len(markets))
 
+    # Re-key any synced positions from slug to real CLOB token ID so price lookups work
+    position_mgr.update_token_ids_from_markets(markets, client)
+
     signals_fired = 0
 
     for market in markets:
@@ -281,3 +284,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
