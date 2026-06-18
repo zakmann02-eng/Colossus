@@ -101,6 +101,12 @@ def _detect_sport(text: str) -> str | None:
     return None
 
 
+def _american_to_prob(odds: int) -> float:
+    if odds > 0:
+        return 100 / (odds + 100)
+    return abs(odds) / (abs(odds) + 100)
+
+
 def _extract_consensus_prob(outcomes: list[dict], target: str) -> float | None:
     """
     Average implied probability across all bookmakers for the given outcome name.
@@ -269,8 +275,8 @@ async def get_bookmaker_signal(
         except (TypeError, ValueError):
             pass
 
-    n_bm = max(1, len(event.get("bookmakers", [])))
     if all_team_probs:
+        n_bm = max(1, len(event.get("bookmakers", [])))
         total_raw = sum(all_team_probs) / (len(all_team_probs) / n_bm)
         if total_raw > 0:
             bm_prob = bm_prob / total_raw
@@ -291,4 +297,3 @@ async def get_bookmaker_signal(
         question[:50], bm_prob, polymarket_price, abs(edge) * 100, side,
     )
     return abs(edge), side
-
