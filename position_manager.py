@@ -143,11 +143,6 @@ class PositionManager:
     # ── Exchange sync (runs every check cycle) ─────────────────────────────────
 
     async def sync_from_exchange(self) -> None:
-        """
-        Pull open positions from the exchange and register any that we're not
-        already tracking. Skips slugs that were closed this session to prevent
-        re-registering positions whose sell order hasn't settled yet.
-        """
         try:
             positions = await self._client.get_open_positions()
         except Exception as exc:
@@ -214,28 +209,37 @@ class PositionManager:
             logger.debug("No tracked positions — skipping TP/SL check")
             return
 
+        # Portfolio API is unreliable (503s) — only use it to confirm position closure,
+        # never as the sole price source.
         positions = await self._client.get_open_positions()
-        live = {
-            (p.get("asset") or p.get("tokenId") or p.get("marketSlug") or ""): p
-            for p in positions
-        }
+        exchange_has_data = len(positions) > 0
         live_by_slug = {
             (p.get("marketSlug") or p.get("slug") or ""): p
             for p in positions
         }
 
         for token_id, entry in list(self._entries.items()):
-            pos = live.get(token_id) or live_by_slug.get(entry.market_slug)
-            if not pos:
-                logger.info("Position %s no longer on exchange — removing", entry.market_slug)
+            # Only drop a position when the exchange responded AND confirmed it's gone
+            if exchange_has_data and entry.market_slug not in live_by_slug:
+                logger.info("Position %s confirmed closed on exchange — removing", entry.market_slug)
                 self._entries.pop(token_id, None)
                 self._save()
                 continue
 
-            current_price = float(
-                pos.get("currentPrice") or pos.get("price") or entry.price
-            )
+            # Fetch price directly from CLOB — works even when portfolio API 503s
+            current_price = await self._client.get_current_price(token_id)
+            if current_price is None:
+                # Fall back to portfolio data if available
+                pos = live_by_slug.get(entry.market_slug)
+                if pos:
+                    current_price = float(pos.get("currentPrice") or pos.get("price") or entry.price)
+                else:
+                    logger.debug("No price available for %s — skipping cycle", entry.market_slug)
+                    continue
+
             pnl = (current_price - entry.price) / entry.price
+            logger.debug("TP/SL check %s: price=%.3f entry=%.3f pnl=%+.1%%",
+                         entry.market_slug, current_price, entry.price, pnl * 100)
 
             if pnl >= entry.tp:
                 await self._close(token_id, entry, current_price, f"TP +{pnl:.1%}")
@@ -272,6 +276,8 @@ class PositionManager:
             logger.error("Failed to send close notification: %s", exc)
         logger.info("Closed position %s: %s", entry.market_slug, reason)
 
+    # ── Partial close (sell half on strong TP) ─────────────────────────────────
+
     async def sell_half(self, token_id: str, entry: _Entry, current_price: float) -> None:
         half_usd = entry.amount_usd / 2
         resp = await self._client.close_position(
@@ -296,13 +302,18 @@ class PositionManager:
     async def get_report(self) -> str:
         positions = await self._client.get_open_positions()
         lines = [f"📊 *Daily Report* — {len(self._entries)} tracked position(s)\n"]
+
         live_by_slug = {
             (p.get("marketSlug") or p.get("slug") or ""): p
             for p in positions
         }
+
         for token_id, entry in self._entries.items():
             pos = live_by_slug.get(entry.market_slug)
-            current_price = float(pos.get("currentPrice") or pos.get("price") or entry.price) if pos else entry.price
+            if pos:
+                current_price = float(pos.get("currentPrice") or pos.get("price") or entry.price)
+            else:
+                current_price = entry.price
             pnl = (current_price - entry.price) / entry.price
             emoji = "🟢" if pnl >= 0 else "🔴"
             lines.append(
@@ -310,4 +321,5 @@ class PositionManager:
                 f"@ {entry.price:.3f} → {current_price:.3f} ({pnl:+.1%}) "
                 f"[{entry.conviction}]"
             )
+
         return "\n".join(lines)
