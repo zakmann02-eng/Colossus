@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import html
 import json
 import logging
 import os
@@ -140,9 +141,44 @@ class PositionManager:
             conviction,
         )
 
+    # ── Token ID resolution ────────────────────────────────────────────────────
+
+    def update_token_ids_from_markets(self, markets: list, client) -> None:
+        """
+        Re-key synced positions from slug-as-token_id to the real CLOB token ID.
+        Called after each market scan so CLOB price lookups succeed.
+        """
+        slug_to_token: dict[str, str] = {}
+        for market in markets:
+            slug = client.get_market_slug(market)
+            if not slug:
+                continue
+            token_id = client.resolve_token_id(market, "YES")
+            if token_id and len(str(token_id)) >= 32:
+                slug_to_token[slug] = token_id
+
+        updated = 0
+        for old_token_id in list(self._entries.keys()):
+            entry = self._entries[old_token_id]
+            real_token_id = slug_to_token.get(entry.market_slug)
+            if real_token_id and real_token_id != old_token_id:
+                self._entries[real_token_id] = entry
+                del self._entries[old_token_id]
+                updated += 1
+                logger.info("token_id updated for %s: %s…", entry.market_slug, real_token_id[:16])
+
+        if updated:
+            self._save()
+            logger.info("update_token_ids_from_markets: updated %d position(s)", updated)
+
     # ── Exchange sync (runs every check cycle) ─────────────────────────────────
 
     async def sync_from_exchange(self) -> None:
+        """
+        Pull open positions from the exchange and register any that we're not
+        already tracking. Skips slugs that were closed this session to prevent
+        re-registering positions whose sell order hasn't settled yet.
+        """
         try:
             positions = await self._client.get_open_positions()
         except Exception as exc:
@@ -161,10 +197,12 @@ class PositionManager:
             if not slug or slug in tracked_slugs or slug in self._closed_this_session:
                 continue
 
+            # Prefer real CLOB token IDs over slug fallback
             token_id = (
                 pos.get("asset")
                 or pos.get("tokenId")
                 or pos.get("token_id")
+                or pos.get("clobTokenId")
                 or slug
             )
 
@@ -209,8 +247,8 @@ class PositionManager:
             logger.debug("No tracked positions — skipping TP/SL check")
             return
 
-        # Portfolio API is unreliable (503s) — only use it to confirm position closure,
-        # never as the sole price source.
+        # Portfolio API is unreliable (503s, stale 0.5 defaults) — use only to confirm closure,
+        # never as a price source.
         positions = await self._client.get_open_positions()
         exchange_has_data = len(positions) > 0
         live_by_slug = {
@@ -226,19 +264,14 @@ class PositionManager:
                 self._save()
                 continue
 
-            # Fetch price directly from CLOB — works even when portfolio API 503s
+            # CLOB is the only reliable price source; portfolio currentPrice defaults to 0.5
             current_price = await self._client.get_current_price(token_id)
             if current_price is None:
-                # Fall back to portfolio data if available
-                pos = live_by_slug.get(entry.market_slug)
-                if pos:
-                    current_price = float(pos.get("currentPrice") or pos.get("price") or entry.price)
-                else:
-                    logger.debug("No price available for %s — skipping cycle", entry.market_slug)
-                    continue
+                logger.debug("No CLOB price for %s — skipping cycle", entry.market_slug)
+                continue
 
             pnl = (current_price - entry.price) / entry.price
-            logger.debug("TP/SL check %s: price=%.3f entry=%.3f pnl=%+.1%%",
+            logger.debug("TP/SL check %s: price=%.3f entry=%.3f pnl=%+.1f%%",
                          entry.market_slug, current_price, entry.price, pnl * 100)
 
             if pnl >= entry.tp:
@@ -256,21 +289,35 @@ class PositionManager:
         logger.info("Close response for %s: %s", entry.market_slug, resp)
 
         self._entries.pop(token_id, None)
-        self._closed_this_session.add(entry.market_slug)
-        self._save()
 
+        # Only block re-sync when the close order actually filled
+        executions = []
+        if isinstance(resp, dict):
+            executions = resp.get("executions") or []
+        if executions:
+            self._closed_this_session.add(entry.market_slug)
+        else:
+            logger.warning(
+                "Close order for %s had no executions — position will re-sync next cycle",
+                entry.market_slug,
+            )
+
+        self._save()
         self._log_trade(entry, current_price, pnl, reason)
 
+        slug_safe       = html.escape(entry.market_slug)
+        conviction_safe = html.escape(str(entry.conviction))
+        triggers_safe   = html.escape(str(entry.triggers))
         msg = (
-            f"🔔 *Position Closed* ({reason})\n"
-            f"Market: `{entry.market_slug}`\n"
+            f"🔔 <b>Position Closed</b> ({reason})\n"
+            f"Market: <code>{slug_safe}</code>\n"
             f"Entry: {entry.price:.3f} → Current: {current_price:.3f}\n"
-            f"Conviction: {entry.conviction} | {entry.triggers}\n"
+            f"Conviction: {conviction_safe} | {triggers_safe}\n"
             f"Result: {'✅' if 'TP' in reason else '🔴'} {reason}"
         )
         try:
             await self._app.bot.send_message(
-                chat_id=self._chat_id, text=msg, parse_mode="Markdown",
+                chat_id=self._chat_id, text=msg, parse_mode="HTML",
             )
         except Exception as exc:
             logger.error("Failed to send close notification: %s", exc)
@@ -284,6 +331,8 @@ class PositionManager:
             entry.market_slug, entry.side, current_price, half_usd
         )
         logger.info("Sell-half response for %s: %s", entry.market_slug, resp)
+
+        # Update entry to reflect remaining half
         self._entries[token_id] = _Entry(
             market_slug = entry.market_slug,
             side        = entry.side,
@@ -323,3 +372,4 @@ class PositionManager:
             )
 
         return "\n".join(lines)
+
