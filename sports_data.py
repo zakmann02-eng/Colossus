@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MIN_EDGE   = 0.03          # 3 % minimum edge to fire T5
+MIN_EDGE   = 0.02          # 2% minimum edge to fire T5
 _CACHE_TTL = 12 * 3600.0   # 12 hours per sport key
 
 # ── Odds API sport keys ────────────────────────────────────────────────────────
@@ -39,7 +39,9 @@ _SPORT_KEYS: dict[str, str] = {
     "mma":          "mma_mixed_martial_arts",
     "ufc":          "mma_mixed_martial_arts",
     "boxing":       "boxing",
-    "tennis":       "tennis_atp_french_open",
+    "tennis":       "tennis_wta",
+    "tennis_atp":   "tennis_atp",
+    "tennis_wta":   "tennis_wta",
     "cricket":      "cricket_test_match",
     "golf":         "golf_pga_championship",
     "rugby":        "rugbyleague_nrl",
@@ -69,8 +71,12 @@ _SPORT_KEYWORDS: dict[str, list[str]] = {
     "mma":        ["mma", "bellator", "one championship", "pfl"],
     "boxing":     ["boxing", "wbc", "wba", "ibf", "wbo", "heavyweight fight",
                    "lightweight fight", "welterweight"],
-    "tennis":     ["wta", "atp", "tennis", "wimbledon", "french open",
-                   "us open", "australian open", "roland garros"],
+    "tennis_atp": ["atp", "itf mens", "itf men", "wimbledon men",
+                   "french open men", "us open men", "australian open men"],
+    "tennis_wta": ["wta", "itf womens", "itf women", "wimbledon women",
+                   "french open women", "us open women", "australian open women",
+                   "grass court championships"],
+    "tennis":     ["tennis", "wimbledon", "roland garros"],
     "soccer":     ["premier league", "epl", "la liga", "serie a", "bundesliga",
                    "ligue 1", "mls", "soccer", "football match",
                    "champions league", "europa league"],
@@ -108,6 +114,10 @@ def _american_to_prob(odds: int) -> float:
 
 
 def _extract_consensus_prob(outcomes: list[dict], target: str) -> float | None:
+    """
+    Average implied probability across all bookmakers for the given outcome name.
+    target is matched case-insensitively anywhere in the outcome name.
+    """
     target_l = target.lower()
     probs: list[float] = []
     for outcome in outcomes:
@@ -119,7 +129,6 @@ def _extract_consensus_prob(outcomes: list[dict], target: str) -> float | None:
             continue
         try:
             p = float(price)
-            # Decimal odds (>= 1.0) vs American odds
             if p >= 1.0:
                 probs.append(1.0 / p)
             else:
@@ -168,6 +177,10 @@ async def _fetch_sport_events(sport_key: str, session: aiohttp.ClientSession) ->
 
 
 def _find_matching_event(events: list[dict], question: str) -> dict | None:
+    """
+    Try to match a Polymarket question to an Odds API event.
+    Looks for team/player name overlap.
+    """
     q = question.lower()
     best: dict | None = None
     best_score = 0
