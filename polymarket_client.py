@@ -160,13 +160,11 @@ class PolymarketClient:
         now_ts = time.time()
 
         def _upcoming_in(markets):
+            # Only count a page as "upcoming" if a game starts or resolves within 7 days.
+            # A September NFL event must NOT trigger the cache stop — we need June games.
+            window = now_ts + 7 * 86_400
             for m in markets:
-                # Prefer gameStartTime — most reliable indicator the game hasn't happened yet.
-                # Fall back to endDate only when gameStartTime is absent (e.g. World Cup markets
-                # that only carry resolutionTime/endDate and no gameStartTime field).
-                has_game_start = bool(m.get("gameStartTime") or m.get("startTime"))
-                fields = ("gameStartTime", "startDate", "startTime") if has_game_start else ("endDate", "startDate")
-                for field in fields:
+                for field in ("gameStartTime", "startTime", "startDate", "endDate"):
                     raw = m.get(field)
                     if not raw:
                         continue
@@ -175,7 +173,7 @@ class PolymarketClient:
                             ts = float(raw)
                         else:
                             ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
-                        if ts > now_ts:
+                        if now_ts < ts < window:
                             return True
                     except Exception:
                         pass
