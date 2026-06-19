@@ -66,7 +66,8 @@ _SPORT_KEYS: dict[str, str] = {
 # ── Keywords → sport key lookup ────────────────────────────────────────────────
 _SPORT_KEYWORDS: dict[str, list[str]] = {
     "worldcup":   ["world cup", "fifa world cup", "copa mundial", "worldcup",
-                   "world cup 2026", "2026 world cup"],
+                   "world cup 2026", "2026 world cup", "fifa wc", "wc 2026",
+                   "fwc", "atc-fwc"],
     "ufc":        ["ufc", "ultimate fighting championship"],
     "mma":        ["mma", "bellator", "one championship", "pfl"],
     "boxing":     ["boxing", "wbc", "wba", "ibf", "wbo", "heavyweight fight",
@@ -114,10 +115,6 @@ def _american_to_prob(odds: int) -> float:
 
 
 def _extract_consensus_prob(outcomes: list[dict], target: str) -> float | None:
-    """
-    Average implied probability across all bookmakers for the given outcome name.
-    target is matched case-insensitively anywhere in the outcome name.
-    """
     target_l = target.lower()
     probs: list[float] = []
     for outcome in outcomes:
@@ -139,7 +136,6 @@ def _extract_consensus_prob(outcomes: list[dict], target: str) -> float | None:
 
 
 async def _fetch_sport_events(sport_key: str, session: aiohttp.ClientSession) -> list[dict]:
-    """Fetch upcoming events for a sport key with caching."""
     api_key = os.getenv("ODDS_API_KEY", "").strip()
     if not api_key:
         return []
@@ -177,10 +173,6 @@ async def _fetch_sport_events(sport_key: str, session: aiohttp.ClientSession) ->
 
 
 def _find_matching_event(events: list[dict], question: str) -> dict | None:
-    """
-    Try to match a Polymarket question to an Odds API event.
-    Looks for team/player name overlap.
-    """
     q = question.lower()
     best: dict | None = None
     best_score = 0
@@ -211,20 +203,15 @@ async def get_bookmaker_signal(
     polymarket_price: float,
     session: aiohttp.ClientSession,
 ) -> tuple[float, str] | None:
-    """
-    Compare bookmaker consensus to Polymarket price.
-
-    Returns (edge, side) if bookmaker consensus diverges by ≥ MIN_EDGE,
-    where side is "YES" if bookmaker says the outcome is more likely than
-    Polymarket implies, else "NO".
-
-    Returns None if no signal or no data available.
-    """
     question = market.get("question") or market.get("title") or ""
     if not question:
         return None
 
-    sport = _detect_sport(question)
+    # Also check slug for sport detection — World Cup slugs start with "atc-fwc-"
+    slug = market.get("slug") or market.get("eventSlug") or ""
+    text_for_detection = f"{question} {slug}"
+
+    sport = _detect_sport(text_for_detection)
     if not sport:
         return None
 
