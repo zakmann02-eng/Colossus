@@ -3,20 +3,21 @@ Trigger evaluation and trade decision logic.
 
 Pre-filters (all must pass):
   - Price between 0.05 and 0.95
-  - Minimum $200 24h volume
+  - Minimum $75 24h volume
   - Resolution time must be known and within 3 days
 
-Requires 3+ triggers to fire a trade:
-  T1  Price outside 40-60% range (competitive market mispricing)
-  T2  Price moved >= 2% in last 15 min (significant momentum)
+Requires 2+ triggers to fire a trade:
+  T1  Price outside 40-60% range (mispricing signal)
+  T2  Price moved >= 1% in last 15 min (momentum)
   T3  24h volume > 2x daily average (unusual activity)
-  T5  Bookmaker consensus >= 3% edge over Polymarket price
+  T5  Bookmaker consensus >= 2% edge over Polymarket price
 
   Note: T4 (resolves within 7 days) is a pre-filter only — it no longer
   counts toward the trigger threshold because it fires on every eligible
   market, adding no discriminating signal value.
 
 Position sizing by triggers fired:
+  2 triggers → LOW  → $0.10–$0.35 · TP 15% · SL 6%
   3 triggers → MED  → $0.35–$0.65 · TP 20% · SL 8%
   4+ triggers→ HIGH → $0.65–$1.00 · TP 25% · SL 10%
 """
@@ -37,18 +38,19 @@ logger = logging.getLogger(__name__)
 
 MIN_PRICE    = 0.05
 MAX_PRICE    = 0.95
-MIN_VOL_24H  = 200.0
-MAX_DAYS_OUT = 4 * 86_400
-MIN_TRIGGERS = 3
+MIN_VOL_24H  = 75.0
+MAX_DAYS_OUT = 3 * 86_400
+MIN_TRIGGERS = 2
 
 T1_LOW  = 0.40
 T1_HIGH = 0.60
-T2_MOVE = 0.02
+T2_MOVE = 0.01
 T3_MULT = 2.0
 T4_SECS = 7 * 86_400
 T5_MIN_EDGE = 0.03
 
 _TIERS = {
+    2: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, "tp": 0.15, "sl": 0.06},
     3: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.20, "sl": 0.08},
     4: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.25, "sl": 0.10},
 }
@@ -137,7 +139,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
 
-    # T5: bookmaker consensus diverges from Polymarket by >= 3% — primary edge signal
+    # T5: bookmaker consensus diverges from Polymarket by >= 2% — primary edge signal
     bm_side: str | None = None
     try:
         bm_result = await get_bookmaker_signal(market, price, client._session)
@@ -152,13 +154,11 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         return None
 
     # Must have at least one directional signal — T1 (price bias) or T5 (bookmaker edge).
-    # T2/T3/T4 alone only confirm activity, not which side to bet.
     has_directional = any(t.startswith("T1:") or t.startswith("T5:") for t in triggers)
     if not has_directional:
         logger.debug("SKIP no-directional (T1/T5 absent): %s", question[:60])
         return None
 
-    # Bookmaker's side defines the actual mispricing direction when available
     side               = bm_side if bm_side else _decide_side(price, market)
     amount, tp, sl, label = _size_position(len(triggers))
     score              = min(100, len(triggers) * 25)
