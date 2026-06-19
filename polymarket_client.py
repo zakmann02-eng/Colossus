@@ -25,6 +25,12 @@ _BLOCKED = {
     "war", "conflict", "invasion", "missile", "nato",
     "fed rate", "interest rate", "inflation", "gdp",
     "oscar", "grammy", "emmy", "celebrity", "reality tv",
+    # Esports — not tradeable on Polymarket.US CLOB
+    "counter-strike", "cs2", "csgo", "dota", "league of legends", "valorant",
+    "esport", "e-sport", "overwatch", "fortnite", "pubg", "apex legends",
+    "map 1", "map 2", "map 3", "map 4", "map 5",
+    # Spread / handicap / prop markets — CLOB rejects these
+    "spread:", "handicap", "(-", "(+",
     # Game segments — only trade full-game markets
     "first half", "second half", "1st half", "2nd half", "halftime", "half time",
     "first quarter", "second quarter", "third quarter", "fourth quarter",
@@ -37,7 +43,7 @@ _BLOCKED = {
     "anytime scorer", "first scorer", "last scorer",
     "to score 2+", "to score 3+", "to record",
     # Over/under totals — block decimal line markets (e.g. "Under 2.5", "Over 1.5 goals")
-    "over 0.", "over 1.", "over 2.", "over 3.", "over 4.", "over 5.",
+    "over 1.", "over 2.", "over 3.", "over 4.", "over 5.",
     "under 0.", "under 1.", "under 2.", "under 3.", "under 4.", "under 5.",
     "total goals", "total runs", "total sets", "total games",
 }
@@ -201,7 +207,7 @@ class PolymarketClient:
 
             found = False
             offset = start_offset
-            max_offset = start_offset + 10000
+            max_offset = start_offset + 30000
 
             while offset <= max_offset:
                 page_events = await _fetch_page(offset)
