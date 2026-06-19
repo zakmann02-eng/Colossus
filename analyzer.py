@@ -7,7 +7,7 @@ Pre-filters (all must pass):
   - Resolution time must be known and within 7 days
 
 Requires 2+ triggers to fire a trade:
-  T1  Price outside 40-60% range (strong mispricing)
+  T1  Price outside 35-65% range
   T2  Price moved >= 1% in last 15 min (significant momentum)
   T3  24h volume > 2x daily average (unusual activity)
   T5  Bookmaker consensus >= 3% edge over Polymarket price
@@ -44,8 +44,8 @@ MIN_TRIGGERS = 2
 
 _skip_log_count = 0  # log first N skips at INFO so Railway shows why
 
-T1_LOW  = 0.40
-T1_HIGH = 0.60
+T1_LOW  = 0.35
+T1_HIGH = 0.65
 T2_MOVE = 0.01
 T3_MULT = 2.0
 T4_SECS = 7 * 86_400
