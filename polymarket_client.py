@@ -445,12 +445,15 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, size_usd: float
     ) -> dict | None:
         close_side = "NO" if side == "YES" else "YES"
-        # Cross the spread so the limit order fills immediately rather than resting.
-        # Last-trade price sits between bid/ask; +0.05 to buy YES, -0.05 to buy NO.
+        # price is the CLOB last-trade for the YES token.
+        # For a NO position (side=NO), close_side=YES: offer above the YES ask.
+        # For a YES position (side=YES), close_side=NO: offer above the NO ask (= below YES bid).
+        # The CLOB last-trade often defaults to 0.50 on thin books, so we also
+        # clamp to at least 0.10 away from the extremes to guarantee order acceptance.
         if close_side == "YES":
-            aggressive_price = min(round(price + 0.05, 4), 0.95)
+            aggressive_price = min(round(price + 0.10, 4), 0.95)
         else:
-            aggressive_price = max(round(price - 0.05, 4), 0.05)
+            aggressive_price = max(round(price - 0.10, 4), 0.05)
         return await self.place_market_order(market_slug, close_side, aggressive_price, size_usd)
 
     # ---------------------------------------------------------------- #
