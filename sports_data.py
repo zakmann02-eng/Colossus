@@ -92,11 +92,154 @@ _SPORT_KEYWORDS: dict[str, list[str]] = {
     "copa":       ["copa libertadores", "copa sudamericana"],
 }
 
+# ── Top players per sport (for player prop T5 signals) ────────────────────────
+_TOP_PLAYERS: dict[str, list[str]] = {
+    "basketball_nba": [
+        "lebron james", "stephen curry", "kevin durant", "nikola jokic",
+        "luka doncic", "jayson tatum", "giannis antetokounmpo", "joel embiid",
+        "anthony davis", "devin booker", "damian lillard", "jimmy butler",
+    ],
+    "americanfootball_nfl": [
+        "patrick mahomes", "josh allen", "lamar jackson", "jalen hurts",
+        "justin jefferson", "jayden daniels", "travis kelce", "travis hunter",
+        "christian mccaffrey", "derrick henry", "jahmyr gibbs",
+    ],
+    "baseball_mlb": [
+        "shohei ohtani", "mike trout", "mookie betts", "aaron judge",
+        "juan soto", "bryce harper", "freddie freeman", "ronald acuna",
+    ],
+    "icehockey_nhl": [
+        "connor mcdavid", "leon draisaitl", "david pastrnak", "auston matthews",
+        "nathan mackinnon", "alex ovechkin", "sidney crosby", "nikita kucherov",
+    ],
+    "soccer_fifa_world_cup": [
+        "messi", "ronaldo", "mbappe", "haaland", "vinicius", "harry kane",
+        "pedri", "yamal", "bellingham", "neymar", "salah",
+    ],
+    "tennis_atp": ["djokovic", "alcaraz", "sinner", "medvedev", "zverev"],
+    "tennis_wta": ["swiatek", "sabalenka", "gauff", "rybakina"],
+}
+
+# Odds API player prop market keys per stat type
+_PROP_MARKET_KEYS: dict[str, str] = {
+    "points":          "player_points",
+    "assists":         "player_assists",
+    "rebounds":        "player_rebounds",
+    "threes":          "player_threes",
+    "passing yards":   "player_pass_yds",
+    "rushing yards":   "player_rush_yds",
+    "receiving yards": "player_reception_yds",
+    "strikeouts":      "pitcher_strikeouts",
+    "home runs":       "batter_home_runs",
+    "goals":           "player_goal_scorer_anytime",
+    "shots on target": "player_shots_on_target",
+}
 
 # ── Cache ──────────────────────────────────────────────────────────────────────
 
 _cache: dict[str, tuple[float, list[dict]]] = {}
+_prop_cache: dict[str, tuple[float, dict]] = {}  # event_id:market → (ts, data)
 _cache_lock = asyncio.Lock()
+_PROP_CACHE_TTL = 3600.0  # 1 hour for player props
+
+
+def _detect_player_and_stat(question: str, sport_key: str) -> tuple[str, str] | None:
+    """Return (player_name, stat_type) if question is a top-player prop, else None."""
+    q = question.lower()
+    for player in _TOP_PLAYERS.get(sport_key, []):
+        if player in q:
+            for stat_name in _PROP_MARKET_KEYS:
+                if stat_name in q:
+                    return player, stat_name
+    return None
+
+
+async def _fetch_player_prop_signal(
+    sport_key: str,
+    player: str,
+    stat: str,
+    polymarket_price: float,
+    session: aiohttp.ClientSession,
+) -> tuple[float, str] | None:
+    """Fetch Odds API player prop odds and compare to Polymarket price."""
+    api_key = os.getenv("ODDS_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    prop_market = _PROP_MARKET_KEYS.get(stat)
+    if not prop_market:
+        return None
+
+    events = await _fetch_sport_events(sport_key, session)
+    if not events:
+        return None
+
+    for event in events[:8]:  # check up to 8 events to find the player
+        event_id = event.get("id")
+        if not event_id:
+            continue
+
+        cache_key = f"{event_id}:{prop_market}"
+        async with _cache_lock:
+            cached = _prop_cache.get(cache_key)
+            if cached and time.time() - cached[0] < _PROP_CACHE_TTL:
+                prop_data = cached[1]
+            else:
+                prop_data = None
+
+        if prop_data is None:
+            url = (
+                f"https://api.the-odds-api.com/v4/sports/{sport_key}"
+                f"/events/{event_id}/odds"
+                f"?apiKey={api_key}&regions=us&markets={prop_market}&oddsFormat=decimal"
+            )
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 404:
+                        continue
+                    if resp.status != 200:
+                        logger.debug("Prop API HTTP %d for %s/%s", resp.status, event_id, prop_market)
+                        continue
+                    prop_data = await resp.json()
+                    async with _cache_lock:
+                        _prop_cache[cache_key] = (time.time(), prop_data)
+            except Exception as exc:
+                logger.debug("Prop API error: %s", exc)
+                continue
+
+        # Search bookmakers for this player's prop
+        probs: list[float] = []
+        for bm in (prop_data or {}).get("bookmakers", []):
+            for mkt in bm.get("markets", []):
+                for outcome in mkt.get("outcomes", []):
+                    desc = (outcome.get("description") or outcome.get("name") or "").lower()
+                    if player not in desc:
+                        continue
+                    try:
+                        price = float(outcome.get("price") or 0)
+                        if price >= 1.0:
+                            probs.append(1.0 / price)
+                    except (TypeError, ValueError):
+                        pass
+
+        if not probs:
+            continue
+
+        bm_prob = sum(probs) / len(probs)
+        bm_prob = max(0.01, min(0.99, bm_prob))
+        edge = bm_prob - polymarket_price
+
+        if abs(edge) < MIN_EDGE:
+            return None
+
+        side = "YES" if edge > 0 else "NO"
+        logger.info(
+            "T5 player prop: %s | %s %s | bm=%.3f poly=%.3f edge=%.2f%% side=%s",
+            player, stat, event.get("id", "")[:8], bm_prob, polymarket_price, abs(edge) * 100, side,
+        )
+        return abs(edge), side
+
+    return None
 
 
 def _detect_sport(text: str) -> str | None:
@@ -115,6 +258,10 @@ def _american_to_prob(odds: int) -> float:
 
 
 def _extract_consensus_prob(outcomes: list[dict], target: str) -> float | None:
+    """
+    Average implied probability across all bookmakers for the given outcome name.
+    target is matched case-insensitively anywhere in the outcome name.
+    """
     target_l = target.lower()
     probs: list[float] = []
     for outcome in outcomes:
@@ -136,6 +283,7 @@ def _extract_consensus_prob(outcomes: list[dict], target: str) -> float | None:
 
 
 async def _fetch_sport_events(sport_key: str, session: aiohttp.ClientSession) -> list[dict]:
+    """Fetch upcoming events for a sport key with caching."""
     api_key = os.getenv("ODDS_API_KEY", "").strip()
     if not api_key:
         return []
@@ -173,6 +321,10 @@ async def _fetch_sport_events(sport_key: str, session: aiohttp.ClientSession) ->
 
 
 def _find_matching_event(events: list[dict], question: str) -> dict | None:
+    """
+    Try to match a Polymarket question to an Odds API event.
+    Looks for team/player name overlap.
+    """
     q = question.lower()
     best: dict | None = None
     best_score = 0
@@ -203,14 +355,21 @@ async def get_bookmaker_signal(
     polymarket_price: float,
     session: aiohttp.ClientSession,
 ) -> tuple[float, str] | None:
+    """
+    Compare bookmaker consensus to Polymarket price.
+
+    Returns (edge, side) if bookmaker consensus diverges by ≥ MIN_EDGE,
+    where side is "YES" if bookmaker says the outcome is more likely than
+    Polymarket implies, else "NO".
+
+    Returns None if no signal or no data available.
+    """
     question = market.get("question") or market.get("title") or ""
     if not question:
         return None
 
-    # Also check slug for sport detection — World Cup slugs start with "atc-fwc-"
     slug = market.get("slug") or market.get("eventSlug") or ""
     text_for_detection = f"{question} {slug}"
-
     sport = _detect_sport(text_for_detection)
     if not sport:
         return None
@@ -218,6 +377,13 @@ async def get_bookmaker_signal(
     sport_key = _SPORT_KEYS.get(sport)
     if not sport_key:
         return None
+
+    # Player prop path — check if this is a top-player stat market
+    prop_info = _detect_player_and_stat(question, sport_key)
+    if prop_info:
+        player, stat = prop_info
+        logger.debug("Player prop detected: %s | %s | %s", player, stat, question[:50])
+        return await _fetch_player_prop_signal(sport_key, player, stat, polymarket_price, session)
 
     events = await _fetch_sport_events(sport_key, session)
     if not events:
