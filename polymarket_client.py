@@ -146,8 +146,8 @@ class PolymarketClient:
                         row["question"]       = m.get("question") or m.get("title") or event.get("title") or ""
                         row["volume24hr"]     = event.get("volume24hr") or m.get("volume24hr") or 0
                         row["resolutionTime"] = (
-                            m.get("resolutionTime") or m.get("endDate") or m.get("closeTime") or
-                            event.get("resolutionTime") or event.get("endDate") or ""
+                            m.get("resolutionTime") or m.get("closeTime") or
+                            event.get("resolutionTime") or event.get("closeTime") or ""
                         )
                         row["eventState"]     = event.get("eventState") or ""
                         markets.append(row)
@@ -576,8 +576,12 @@ class PolymarketClient:
     def seconds_to_resolution(self, market):
         raw = market.get("resolutionTime") or market.get("closeTime")
         if not raw:
-            game_raw = market.get("gameStartTime")
-            if game_raw:
+            # Prefer game start time over tournament endDate — avoids WC markets
+            # with endDate=July 19 being rejected by the 7-day MAX_DAYS_OUT filter.
+            for gst_key in ("gameStartTime", "startTime"):
+                game_raw = market.get(gst_key)
+                if not game_raw:
+                    continue
                 try:
                     if isinstance(game_raw, (int, float)):
                         game_ts = float(game_raw)
@@ -585,8 +589,8 @@ class PolymarketClient:
                         game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
                     return (game_ts + 4 * 3600) - time.time()
                 except Exception:
-                    return None
-            # Fall back to endDate/startDate — common in Polymarket.US events
+                    pass
+            # Last resort: endDate/startDate (tournament-level markets)
             raw = market.get("endDate") or market.get("startDate")
             if not raw:
                 return None
