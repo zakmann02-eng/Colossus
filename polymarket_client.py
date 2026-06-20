@@ -45,7 +45,9 @@ _BLOCKED = {
     # Over/under totals — block decimal line markets (e.g. "Under 2.5", "Over 1.5 goals")
     "over 0.", "over 1.", "over 2.", "over 3.", "over 4.", "over 5.",
     "under 0.", "under 1.", "under 2.", "under 3.", "under 4.", "under 5.",
-    "total goals", "total runs", "total sets", "total games",
+       "total goals", "total runs", "total sets", "total games",
+    # Award / multi-outcome markets — no binary YES/NO CLOB pricing
+    "mvp", "most valuable", "award", "golden boot", "ballon d'or",
 }
 
 
@@ -227,7 +229,7 @@ class PolymarketClient:
                     self._upcoming_offset = offset
                     self._save_offset_cache(offset)
                     found = True
-                    for extra_off in range(offset + 200, offset + 800, 200):
+                    for extra_off in range(offset + 200, offset + 4800, 200):
                         extra_events = await _fetch_page(extra_off)
                         if not extra_events:
                             break
