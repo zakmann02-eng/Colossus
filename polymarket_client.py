@@ -445,7 +445,13 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, size_usd: float
     ) -> dict | None:
         close_side = "NO" if side == "YES" else "YES"
-        return await self.place_market_order(market_slug, close_side, price, size_usd)
+        # Cross the spread so the limit order fills immediately rather than resting.
+        # Last-trade price sits between bid/ask; +0.05 to buy YES, -0.05 to buy NO.
+        if close_side == "YES":
+            aggressive_price = min(round(price + 0.05, 4), 0.95)
+        else:
+            aggressive_price = max(round(price - 0.05, 4), 0.05)
+        return await self.place_market_order(market_slug, close_side, aggressive_price, size_usd)
 
     # ---------------------------------------------------------------- #
     # Helpers                                                           #
