@@ -55,6 +55,8 @@ class PositionManager:
         self._init_trade_log()
         self._load()
 
+    # ── Persistence ────────────────────────────────────────────────────────────
+
     def _load(self) -> None:
         if not _POSITIONS_FILE.exists():
             return
@@ -81,19 +83,32 @@ class PositionManager:
             except Exception as exc:
                 logger.warning("Could not init trade_log.csv: %s", exc)
 
-    def _log_trade(self, entry: _Entry, exit_price: float, pnl_pct: float, reason: str) -> None:
+    def _log_trade(
+        self,
+        entry: _Entry,
+        exit_price: float,
+        pnl_pct: float,
+        reason: str,
+    ) -> None:
         from datetime import datetime, timezone
         row = [
             datetime.now(timezone.utc).isoformat(),
-            entry.market_slug, entry.side,
-            f"{entry.price:.4f}", f"{exit_price:.4f}",
-            f"{pnl_pct:.2%}", reason, entry.conviction, entry.triggers,
+            entry.market_slug,
+            entry.side,
+            f"{entry.price:.4f}",
+            f"{exit_price:.4f}",
+            f"{pnl_pct:.2%}",
+            reason,
+            entry.conviction,
+            entry.triggers,
         ]
         try:
             with _TRADE_LOG.open("a", newline="") as f:
                 csv.writer(f).writerow(row)
         except Exception as exc:
             logger.warning("Could not write trade_log.csv: %s", exc)
+
+    # ── Entry recording ────────────────────────────────────────────────────────
 
     def record_entry(
         self,
@@ -126,6 +141,8 @@ class PositionManager:
             conviction,
         )
 
+    # ── Token ID resolution ────────────────────────────────────────────────────
+
     def update_token_ids_from_markets(self, markets: list, client) -> None:
         slug_to_token: dict[str, str] = {}
         for market in markets:
@@ -150,6 +167,8 @@ class PositionManager:
             self._save()
             logger.info("update_token_ids_from_markets: updated %d position(s)", updated)
 
+    # ── Exchange sync (runs every check cycle) ─────────────────────────────────
+
     async def sync_from_exchange(self) -> None:
         try:
             positions = await self._client.get_open_positions()
@@ -161,22 +180,29 @@ class PositionManager:
 
         for pos in positions:
             slug = (
-                pos.get("marketSlug") or pos.get("slug")
-                or pos.get("market_slug") or ""
+                pos.get("marketSlug")
+                or pos.get("slug")
+                or pos.get("market_slug")
+                or ""
             )
             if not slug or slug in tracked_slugs or slug in self._closed_this_session:
                 continue
 
             token_id = (
-                pos.get("asset") or pos.get("tokenId")
-                or pos.get("token_id") or pos.get("clobTokenId") or slug
+                pos.get("asset")
+                or pos.get("tokenId")
+                or pos.get("token_id")
+                or pos.get("clobTokenId")
+                or slug
             )
 
             net = float(pos.get("netPosition") or pos.get("size") or 0)
             side = "YES" if net > 0 else "NO"
 
             cost = pos.get("cost") or {}
-            cost_val = float(cost.get("value") if isinstance(cost, dict) else cost or 0)
+            cost_val = float(
+                cost.get("value") if isinstance(cost, dict) else cost or 0
+            )
             entry_price = float(
                 pos.get("avgPrice") or pos.get("price") or
                 (cost_val / abs(net) if abs(net) > 0 else 0.50)
@@ -195,9 +221,14 @@ class PositionManager:
                 triggers    = "exchange_sync",
             )
             tracked_slugs.add(slug)
-            logger.info("sync_from_exchange: registered %s side=%s price=%.3f", slug, side, entry_price)
+            logger.info(
+                "sync_from_exchange: registered %s side=%s price=%.3f",
+                slug, side, entry_price,
+            )
 
         self._save()
+
+    # ── TP/SL monitoring ───────────────────────────────────────────────────────
 
     async def check_positions(self) -> None:
         await self.sync_from_exchange()
@@ -234,7 +265,9 @@ class PositionManager:
             elif pnl <= -entry.sl:
                 await self._close(token_id, entry, current_price, f"SL {pnl:.1%}")
 
-    async def _close(self, token_id: str, entry: _Entry, current_price: float, reason: str) -> None:
+    async def _close(
+        self, token_id: str, entry: _Entry, current_price: float, reason: str
+    ) -> None:
         pnl = (current_price - entry.price) / entry.price
         resp = await self._client.close_position(
             entry.market_slug, entry.side, current_price, entry.amount_usd
@@ -243,8 +276,6 @@ class PositionManager:
 
         self._entries.pop(token_id, None)
 
-        # Always block re-sync after a close attempt — unfilled close orders
-        # still exist on the exchange and the position should not be re-entered.
         self._closed_this_session.add(entry.market_slug)
         executions = (resp or {}).get("executions") or [] if isinstance(resp, dict) else []
         if not executions:
@@ -274,32 +305,39 @@ class PositionManager:
             logger.error("Failed to send close notification: %s", exc)
         logger.info("Closed position %s: %s", entry.market_slug, reason)
 
+    # ── Partial close (sell half on strong TP) ─────────────────────────────────
+
     async def sell_half(self, token_id: str, entry: _Entry, current_price: float) -> None:
         half_usd = entry.amount_usd / 2
         resp = await self._client.close_position(
             entry.market_slug, entry.side, current_price, half_usd
         )
         logger.info("Sell-half response for %s: %s", entry.market_slug, resp)
+
         self._entries[token_id] = _Entry(
-            market_slug  = entry.market_slug,
-            side         = entry.side,
-            price        = entry.price,
-            tp           = entry.tp,
-            sl           = entry.sl,
-            amount_usd   = half_usd,
-            price_misses = entry.price_misses,
-            conviction   = entry.conviction,
-            triggers     = entry.triggers,
+            market_slug = entry.market_slug,
+            side        = entry.side,
+            price       = entry.price,
+            tp          = entry.tp,
+            sl          = entry.sl,
+            amount_usd  = half_usd,
+            price_misses= entry.price_misses,
+            conviction  = entry.conviction,
+            triggers    = entry.triggers,
         )
         self._save()
 
+    # ── Daily P&L report ───────────────────────────────────────────────────────
+
     async def get_report(self) -> str:
         positions = await self._client.get_open_positions()
-        lines = [f"📊 *Daily Report* — {len(self._entries)} tracked position(s)\n"]
+        lines = [f"📊 Daily Report — {len(self._entries)} tracked position(s)\n"]
+
         live_by_slug = {
             (p.get("marketSlug") or p.get("slug") or ""): p
             for p in positions
         }
+
         for token_id, entry in self._entries.items():
             pos = live_by_slug.get(entry.market_slug)
             if pos:
@@ -309,8 +347,9 @@ class PositionManager:
             pnl = (current_price - entry.price) / entry.price
             emoji = "🟢" if pnl >= 0 else "🔴"
             lines.append(
-                f"{emoji} `{entry.market_slug[:24]}` {entry.side} "
+                f"{emoji} {entry.market_slug[:24]}  {entry.side} "
                 f"@ {entry.price:.3f} → {current_price:.3f} ({pnl:+.1%}) "
                 f"[{entry.conviction}]"
             )
+
         return "\n".join(lines)
