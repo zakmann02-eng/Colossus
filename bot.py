@@ -81,7 +81,7 @@ _traded_events_this_session: set[str] = set()
 async def _send(app: Application, text: str) -> None:
     try:
         await app.bot.send_message(
-            chat_id=TELEGRAM_CHAT, text=text, parse_mode="Markdown",
+            chat_id=TELEGRAM_CHAT, text=text, parse_mode=None,
             disable_web_page_preview=True,
         )
     except Exception as exc:
@@ -168,11 +168,11 @@ async def scan_markets(
         status = "✅ filled" if filled else f"⚠️ not filled ({order_status or 'no response'})"
 
         msg = (
-            f"🏆 *Trade Opened*\n"
-            f"*{signal.question[:80]}*\n\n"
-            f"Side: `{signal.side}` @ {signal.price_now:.3f}\n"
+            f"🏆 Trade Opened\n"
+            f"{signal.question[:80]}\n\n"
+            f"Side: {signal.side} @ {signal.price_now:.3f}\n"
             f"Amount: ${signal.amount_usd:.2f} ({signal.conviction} conviction)\n"
-            f"TP: {signal.tp_pct:.0%} · SL: {signal.sl_pct:.0%}\n"
+            f"TP: {signal.tp_pct:.0%}  SL: {signal.sl_pct:.0%}\n"
             f"Event date: {signal.event_date}\n"
             f"Triggers: {', '.join(signal.triggers)}\n"
             f"Score: {signal.score}/100\n"
@@ -198,15 +198,15 @@ async def scan_markets(
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     text = (
-        f"*Colossus Status*\n"
+        f"Colossus Status\n"
         f"Time: {now}\n"
         f"Paused: {'yes' if os.getenv('PAUSED','false').lower()=='true' else 'no'}\n"
-        f"Trade range: ${MIN_TRADE_USD:.2f} – ${MAX_TRADE_USD:.2f}\n"
-        f"TP: {TP_PCT:.0%} | SL: {SL_PCT:.0%}\n"
+        f"Trade range: ${MIN_TRADE_USD:.2f} - ${MAX_TRADE_USD:.2f}\n"
+        f"TP: {TP_PCT:.0%}  SL: {SL_PCT:.0%}\n"
         f"Scan interval: {SCAN_INTERVAL}s\n"
         f"Traded markets this session: {len(_traded_this_session)}"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text)
 
 
 async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -215,13 +215,13 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not positions:
         await update.message.reply_text("No open positions.")
         return
-    lines = ["*Open Positions*\n"]
+    lines = ["Open Positions\n"]
     for p in positions[:10]:
         slug = (p.get("marketSlug") or p.get("slug") or "")[:20]
         size = p.get("size") or p.get("quantity") or "?"
         avg  = p.get("avgPrice") or p.get("price") or "?"
-        lines.append(f"• `{slug}` size={size} avg={avg}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        lines.append(f"  {slug}  size={size}  avg={avg}")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -237,7 +237,7 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     pos_mgr: PositionManager = ctx.bot_data["pos_mgr"]
     report = await pos_mgr.get_report()
-    await update.message.reply_text(report, parse_mode="Markdown")
+    await update.message.reply_text(report)
 
 
 async def daily_report(app: Application, pos_mgr: PositionManager) -> None:
@@ -286,10 +286,10 @@ async def main() -> None:
 
     mode = "Auto-trading" if trading_enabled else "Signal-alert mode (no client)"
     await _send(app, (
-        f"🤖 *Colossus online*\n"
+        f"🤖 Colossus online\n"
         f"Mode: {mode}\n"
-        f"Scanning every {SCAN_INTERVAL}s · TP {TP_PCT:.0%} · SL {SL_PCT:.0%}\n"
-        f"Trade range: ${MIN_TRADE_USD:.2f}–${MAX_TRADE_USD:.2f}\n"
+        f"Scanning every {SCAN_INTERVAL}s  TP {TP_PCT:.0%}  SL {SL_PCT:.0%}\n"
+        f"Trade range: ${MIN_TRADE_USD:.2f}-${MAX_TRADE_USD:.2f}\n"
         "Commands: /status /positions /report /pause /resume"
     ))
 
