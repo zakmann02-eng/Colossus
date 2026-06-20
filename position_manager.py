@@ -144,6 +144,10 @@ class PositionManager:
     # ── Token ID resolution ────────────────────────────────────────────────────
 
     def update_token_ids_from_markets(self, markets: list, client) -> None:
+        """
+        Re-key synced positions from slug-as-token_id to the real CLOB token ID.
+        Called after each market scan so CLOB price lookups succeed.
+        """
         slug_to_token: dict[str, str] = {}
         for market in markets:
             slug = client.get_market_slug(market)
@@ -170,6 +174,11 @@ class PositionManager:
     # ── Exchange sync (runs every check cycle) ─────────────────────────────────
 
     async def sync_from_exchange(self) -> None:
+        """
+        Pull open positions from the exchange and register any that we're not
+        already tracking. Skips slugs that were closed this session to prevent
+        re-registering positions whose sell order hasn't settled yet.
+        """
         try:
             positions = await self._client.get_open_positions()
         except Exception as exc:
@@ -188,6 +197,7 @@ class PositionManager:
             if not slug or slug in tracked_slugs or slug in self._closed_this_session:
                 continue
 
+            # Prefer real CLOB token IDs over slug fallback
             token_id = (
                 pos.get("asset")
                 or pos.get("tokenId")
@@ -237,6 +247,8 @@ class PositionManager:
             logger.debug("No tracked positions — skipping TP/SL check")
             return
 
+        # Portfolio API is unreliable (503s, stale 0.5 defaults) — use only to confirm closure,
+        # never as a price source.
         positions = await self._client.get_open_positions()
         exchange_has_data = len(positions) > 0
         live_by_slug = {
@@ -245,15 +257,23 @@ class PositionManager:
         }
 
         for token_id, entry in list(self._entries.items()):
+            # Only drop a position when the exchange responded AND confirmed it's gone
             if exchange_has_data and entry.market_slug not in live_by_slug:
                 logger.info("Position %s confirmed closed on exchange — removing", entry.market_slug)
                 self._entries.pop(token_id, None)
                 self._save()
                 continue
 
+            # CLOB is the only reliable price source; portfolio currentPrice defaults to 0.5
             current_price = await self._client.get_current_price(token_id)
             if current_price is None:
                 logger.debug("No CLOB price for %s — skipping cycle", entry.market_slug)
+                continue
+
+            # 0.500 is the CLOB sentinel for illiquid/thin books with no real trades.
+            # Evaluating TP/SL against it produces false triggers (e.g. entry 0.21 → 0.50 = +138%).
+            if abs(current_price - 0.500) < 0.001:
+                logger.debug("CLOB returned default 0.500 for %s — skipping TP/SL", entry.market_slug)
                 continue
 
             pnl = (current_price - entry.price) / entry.price
@@ -276,6 +296,8 @@ class PositionManager:
 
         self._entries.pop(token_id, None)
 
+        # Always block re-sync after a close attempt — unfilled close orders
+        # still exist on the exchange and the position should not be re-entered.
         self._closed_this_session.add(entry.market_slug)
         executions = (resp or {}).get("executions") or [] if isinstance(resp, dict) else []
         if not executions:
@@ -314,6 +336,7 @@ class PositionManager:
         )
         logger.info("Sell-half response for %s: %s", entry.market_slug, resp)
 
+        # Update entry to reflect remaining half
         self._entries[token_id] = _Entry(
             market_slug = entry.market_slug,
             side        = entry.side,
