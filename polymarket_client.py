@@ -43,7 +43,7 @@ _BLOCKED = {
     "anytime scorer", "first scorer", "last scorer",
     "to score 2+", "to score 3+", "to record",
     # Over/under totals — block decimal line markets (e.g. "Under 2.5", "Over 1.5 goals")
-    "over 1.", "over 2.", "over 3.", "over 4.", "over 5.",
+    "over 0.", "over 1.", "over 2.", "over 3.", "over 4.", "over 5.",
     "under 0.", "under 1.", "under 2.", "under 3.", "under 4.", "under 5.",
     "total goals", "total runs", "total sets", "total games",
 }
@@ -265,6 +265,25 @@ class PolymarketClient:
             event_state = str(event_state_raw or "").upper()
         if event_state in ("FINAL", "COMPLETED", "POST_GAME", "POSTGAME", "ENDED", "RESOLVED"):
             return False
+
+        # Enforce gameStartTime window — skip past games and games > 7 days out
+        game_raw = market.get("gameStartTime")
+        if game_raw:
+            try:
+                if isinstance(game_raw, (int, float)):
+                    game_ts = float(game_raw)
+                else:
+                    game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
+                now_ts = time.time()
+                if game_ts < now_ts - 7200:  # game started more than 2 hours ago
+                    logger.debug("BLOCKED past-game: %s", (market.get("question") or "")[:60])
+                    return False
+                if game_ts > now_ts + 7 * 86400:  # more than 7 days out
+                    logger.debug("BLOCKED far-future: %s", (market.get("question") or "")[:60])
+                    return False
+            except Exception:
+                pass
+
         text = " ".join([
             (market.get("question") or "").lower(),
             (market.get("title") or "").lower(),
