@@ -131,6 +131,12 @@ async def scan_markets(
         if event_slug and event_slug in _traded_events_this_session:
             continue
 
+        # Skip if we already hold an open position in this market (persists across restarts)
+        market_slug_check = client.get_market_slug(market)
+        if position_mgr.has_position(market_slug_check):
+            logger.debug("Already have position in %s — skipping", market_slug_check)
+            continue
+
         try:
             signal = await evaluate_market(market, client)
         except Exception as exc:
