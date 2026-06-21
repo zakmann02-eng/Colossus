@@ -141,6 +141,9 @@ class PositionManager:
             conviction,
         )
 
+    def has_position(self, market_slug: str) -> bool:
+        return any(e.market_slug == market_slug for e in self._entries.values())
+
     # ── Token ID resolution ────────────────────────────────────────────────────
 
     def update_token_ids_from_markets(self, markets: list, client) -> None:
