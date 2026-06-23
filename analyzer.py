@@ -3,12 +3,12 @@ Trigger evaluation and trade decision logic.
 
 Pre-filters (all must pass):
   - Price between 0.05 and 0.95
-  - Minimum $75 24h volume
-  - Resolution time must be known and within 7 days
+  - Minimum $200 24h volume
+  - Resolution time must be known and within 2 days
 
-Requires 2+ triggers to fire a trade:
-  T1  Price outside 35-65% range
-  T2  Price moved >= 1% in last 15 min (significant momentum)
+Requires 3+ triggers to fire a trade:
+  T1  Price outside 30-70% range (strong mispricing)
+  T2  Price moved >= 2% in last 15 min (significant momentum)
   T3  24h volume > 2x daily average (unusual activity)
   T5  Bookmaker consensus >= 3% edge over Polymarket price
 
@@ -17,7 +17,6 @@ Requires 2+ triggers to fire a trade:
   market, adding no discriminating signal value.
 
 Position sizing by triggers fired:
-  2 triggers → LOW  → $0.10–$0.35 · TP 15% · SL 6%
   3 triggers → MED  → $0.35–$0.65 · TP 20% · SL 8%
   4+ triggers→ HIGH → $0.65–$1.00 · TP 25% · SL 10%
 """
@@ -44,8 +43,8 @@ MIN_TRIGGERS = 2
 
 _skip_log_count = 0  # log first N skips at INFO so Railway shows why
 
-T1_LOW  = 0.35
-T1_HIGH = 0.65
+T1_LOW  = 0.40
+T1_HIGH = 0.60
 T2_MOVE = 0.01
 T3_MULT = 2.0
 T4_SECS = 7 * 86_400
@@ -173,6 +172,13 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     has_directional = any(t.startswith("T1:") or t.startswith("T5:") for t in triggers)
     if not has_directional:
         logger.debug("SKIP no-directional (T1/T5 absent): %s", question[:60])
+        return None
+
+    # For extreme prices (heavy favorites/underdogs), T5 bookmaker confirmation is required.
+    # T1 alone on a 70%+ favorite just finds correctly-priced markets and bets against them.
+    has_t5 = any(t.startswith("T5:") for t in triggers)
+    if (price > 0.70 or price < 0.30) and not has_t5:
+        logger.debug("SKIP extreme price(%.2f) without T5 confirmation: %s", price, question[:60])
         return None
 
     # Bookmaker's side defines the actual mispricing direction when available
