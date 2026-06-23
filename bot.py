@@ -67,6 +67,7 @@ POLY_SECRET_KEY = _require("POLYMARKET_SECRET_KEY")
 
 MIN_TRADE_USD = float(os.getenv("MIN_TRADE_USD",   "0.10"))
 MAX_TRADE_USD = float(os.getenv("MAX_TRADE_USD",   "1.00"))
+RESERVE_USD   = float(os.getenv("RESERVE_USD",     "5.00"))
 TP_PCT        = float(os.getenv("TAKE_PROFIT_PCT", "20.0")) / 100
 SL_PCT        = float(os.getenv("STOP_LOSS_PCT",   "8.0"))  / 100
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL",     "60"))
@@ -103,6 +104,9 @@ async def scan_markets(
     balance = await client.get_balance()
     if balance < MIN_TRADE_USD:
         logger.info("Insufficient balance ($%.2f) — skipping trades", balance)
+        return
+    if balance <= RESERVE_USD:
+        logger.info("Balance ($%.2f) at or below reserve ($%.2f) — skipping trades", balance, RESERVE_USD)
         return
 
     markets = await client.get_sports_markets(limit=100)
@@ -155,6 +159,9 @@ async def scan_markets(
             return
 
         balance = await client.get_balance()
+        if balance - signal.amount_usd < RESERVE_USD:
+            logger.info("Trade would breach reserve — balance=$%.2f reserve=$%.2f — stopping", balance, RESERVE_USD)
+            break
         if balance < signal.amount_usd:
             logger.info("Insufficient balance ($%.2f) for $%.2f trade — stopping", balance, signal.amount_usd)
             break
@@ -208,6 +215,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"Time: {now}\n"
         f"Paused: {'yes' if os.getenv('PAUSED','false').lower()=='true' else 'no'}\n"
         f"Trade range: ${MIN_TRADE_USD:.2f} - ${MAX_TRADE_USD:.2f}\n"
+        f"Reserve: ${RESERVE_USD:.2f}\n"
         f"TP: {TP_PCT:.0%}  SL: {SL_PCT:.0%}\n"
         f"Scan interval: {SCAN_INTERVAL}s\n"
         f"Traded markets this session: {len(_traded_this_session)}"
@@ -295,7 +303,7 @@ async def main() -> None:
         f"🤖 Colossus online\n"
         f"Mode: {mode}\n"
         f"Scanning every {SCAN_INTERVAL}s  TP {TP_PCT:.0%}  SL {SL_PCT:.0%}\n"
-        f"Trade range: ${MIN_TRADE_USD:.2f}-${MAX_TRADE_USD:.2f}\n"
+        f"Reserve: ${RESERVE_USD:.2f}  Trade range: ${MIN_TRADE_USD:.2f}-${MAX_TRADE_USD:.2f}\n"
         "Commands: /status /positions /report /pause /resume"
     ))
 
