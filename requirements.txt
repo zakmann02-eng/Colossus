@@ -4,3 +4,5 @@ python-dotenv==1.0.1
 APScheduler==3.10.4
 colorlog==6.8.2
 polymarket-us
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
