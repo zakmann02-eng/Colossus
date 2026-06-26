@@ -16,11 +16,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _POSITIONS_FILE = Path("positions.json")
+_RESERVE_FILE   = Path("reserve.json")
 _TRADE_LOG      = Path("trade_log.csv")
 _CSV_HEADERS    = [
     "timestamp", "market_slug", "side", "entry_price", "exit_price",
     "pnl_pct", "reason", "conviction", "triggers",
 ]
+_RESERVE_PCT = 0.10  # 10% of each winning trade's profit goes to reserve
 
 
 @dataclass
@@ -52,8 +54,10 @@ class PositionManager:
         self._default_sl          = default_sl
         self._entries: dict[str, _Entry] = {}
         self._closed_this_session: set[str] = set()
+        self._reserve_usd: float = 0.0
         self._init_trade_log()
         self._load()
+        self._load_reserve()
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
@@ -74,6 +78,23 @@ class PositionManager:
             _POSITIONS_FILE.write_text(json.dumps(data, indent=2))
         except Exception as exc:
             logger.warning("Could not save positions.json: %s", exc)
+
+    def _load_reserve(self) -> None:
+        try:
+            if _RESERVE_FILE.exists():
+                self._reserve_usd = float(json.loads(_RESERVE_FILE.read_text()).get("reserve_usd", 0.0))
+                logger.info("Reserve loaded: $%.2f", self._reserve_usd)
+        except Exception as exc:
+            logger.warning("Could not load reserve.json: %s", exc)
+
+    def _save_reserve(self) -> None:
+        try:
+            _RESERVE_FILE.write_text(json.dumps({"reserve_usd": round(self._reserve_usd, 4)}, indent=2))
+        except Exception as exc:
+            logger.warning("Could not save reserve.json: %s", exc)
+
+    def get_reserve(self) -> float:
+        return self._reserve_usd
 
     def _init_trade_log(self) -> None:
         if not _TRADE_LOG.exists():
@@ -312,6 +333,15 @@ class PositionManager:
         self._save()
         self._log_trade(entry, current_price, pnl, reason)
 
+        # On winning closes, add 10% of profit to persistent reserve
+        if pnl > 0:
+            profit_usd = entry.amount_usd * pnl
+            contribution = round(profit_usd * _RESERVE_PCT, 4)
+            self._reserve_usd += contribution
+            self._save_reserve()
+            logger.info("Reserve +$%.4f (10%% of $%.4f profit) → total $%.2f",
+                        contribution, profit_usd, self._reserve_usd)
+
         slug_safe       = html.escape(entry.market_slug)
         conviction_safe = html.escape(str(entry.conviction))
         triggers_safe   = html.escape(str(entry.triggers))
@@ -379,3 +409,4 @@ class PositionManager:
             )
 
         return "\n".join(lines)
+
