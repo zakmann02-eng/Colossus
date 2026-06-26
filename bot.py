@@ -67,7 +67,6 @@ POLY_SECRET_KEY = _require("POLYMARKET_SECRET_KEY")
 
 MIN_TRADE_USD = float(os.getenv("MIN_TRADE_USD",   "0.10"))
 MAX_TRADE_USD = float(os.getenv("MAX_TRADE_USD",   "1.00"))
-RESERVE_USD   = float(os.getenv("RESERVE_USD",     "5.00"))
 TP_PCT        = float(os.getenv("TAKE_PROFIT_PCT", "20.0")) / 100
 SL_PCT        = float(os.getenv("STOP_LOSS_PCT",   "8.0"))  / 100
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL",     "60"))
@@ -102,11 +101,11 @@ async def scan_markets(
 
     logger.info("Scanning markets…")
     balance = await client.get_balance()
-    if balance < MIN_TRADE_USD:
-        logger.info("Insufficient balance ($%.2f) — skipping trades", balance)
-        return
-    if balance <= RESERVE_USD:
-        logger.info("Balance ($%.2f) at or below reserve ($%.2f) — skipping trades", balance, RESERVE_USD)
+    reserve = position_mgr.get_reserve()
+    tradeable = balance - reserve
+    if tradeable < MIN_TRADE_USD:
+        logger.info("Tradeable balance ($%.2f - $%.2f reserve = $%.2f) too low — skipping trades",
+                    balance, reserve, tradeable)
         return
 
     markets = await client.get_sports_markets(limit=100)
@@ -159,11 +158,10 @@ async def scan_markets(
             return
 
         balance = await client.get_balance()
-        if balance - signal.amount_usd < RESERVE_USD:
-            logger.info("Trade would breach reserve — balance=$%.2f reserve=$%.2f — stopping", balance, RESERVE_USD)
-            break
-        if balance < signal.amount_usd:
-            logger.info("Insufficient balance ($%.2f) for $%.2f trade — stopping", balance, signal.amount_usd)
+        reserve = position_mgr.get_reserve()
+        if balance - reserve < signal.amount_usd:
+            logger.info("Trade would breach reserve — tradeable=$%.2f reserve=$%.2f trade=$%.2f — stopping",
+                        balance - reserve, reserve, signal.amount_usd)
             break
 
         signals_fired += 1
@@ -209,13 +207,17 @@ async def scan_markets(
 # ── Telegram commands ─────────────────────────────────────────────────────────
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    pos_mgr: PositionManager = ctx.bot_data["pos_mgr"]
+    client: PolymarketClient = ctx.bot_data["client"]
+    now      = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    balance  = await client.get_balance()
+    reserve  = pos_mgr.get_reserve()
     text = (
         f"Colossus Status\n"
         f"Time: {now}\n"
         f"Paused: {'yes' if os.getenv('PAUSED','false').lower()=='true' else 'no'}\n"
+        f"Balance: ${balance:.2f}  Reserve: ${reserve:.2f}  Tradeable: ${balance - reserve:.2f}\n"
         f"Trade range: ${MIN_TRADE_USD:.2f} - ${MAX_TRADE_USD:.2f}\n"
-        f"Reserve: ${RESERVE_USD:.2f}\n"
         f"TP: {TP_PCT:.0%}  SL: {SL_PCT:.0%}\n"
         f"Scan interval: {SCAN_INTERVAL}s\n"
         f"Traded markets this session: {len(_traded_this_session)}"
@@ -236,6 +238,20 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         avg  = p.get("avgPrice") or p.get("price") or "?"
         lines.append(f"  {slug}  size={size}  avg={avg}")
     await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_sellall(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    pos_mgr: PositionManager = ctx.bot_data["pos_mgr"]
+    client: PolymarketClient = ctx.bot_data["client"]
+    entries = list(pos_mgr._entries.items())
+    if not entries:
+        await update.message.reply_text("No tracked positions to sell.")
+        return
+    await update.message.reply_text(f"Closing {len(entries)} position(s)…")
+    for token_id, entry in entries:
+        current_price = await client.get_current_price(token_id) or entry.price
+        await pos_mgr._close(token_id, entry, current_price, "MANUAL /sellall")
+    await update.message.reply_text("All positions closed.")
 
 
 async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -279,6 +295,7 @@ async def main() -> None:
     app.add_handler(CommandHandler("pause",     cmd_pause))
     app.add_handler(CommandHandler("resume",    cmd_resume))
     app.add_handler(CommandHandler("report",    cmd_report))
+    app.add_handler(CommandHandler("sellall",   cmd_sellall))
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -303,8 +320,8 @@ async def main() -> None:
         f"🤖 Colossus online\n"
         f"Mode: {mode}\n"
         f"Scanning every {SCAN_INTERVAL}s  TP {TP_PCT:.0%}  SL {SL_PCT:.0%}\n"
-        f"Reserve: ${RESERVE_USD:.2f}  Trade range: ${MIN_TRADE_USD:.2f}-${MAX_TRADE_USD:.2f}\n"
-        "Commands: /status /positions /report /pause /resume"
+        f"Trade range: ${MIN_TRADE_USD:.2f}-${MAX_TRADE_USD:.2f}\n"
+        "Commands: /status /positions /report /pause /resume /sellall"
     ))
 
     logger.info("Bot running. Press Ctrl+C to stop.")
@@ -323,3 +340,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
