@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 import aiohttp
 import colorlog
+import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from telegram import Update
@@ -25,6 +26,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from analyzer import evaluate_market
 from polymarket_client import PolymarketClient
 from position_manager import PositionManager
+import scan_log
 
 load_dotenv()
 
@@ -138,6 +140,9 @@ async def scan_markets(
         market_slug_check = client.get_market_slug(market)
         if position_mgr.has_position(market_slug_check):
             logger.debug("Already have position in %s — skipping", market_slug_check)
+            scan_log.add(market_slug_check,
+                         market.get("question") or market.get("title") or "",
+                         None, "SKIP", "already holding position")
             continue
 
         try:
@@ -177,6 +182,9 @@ async def scan_markets(
         order_status = (resp or {}).get("status", "") if isinstance(resp, dict) else ""
         filled = order_status in ("matched", "filled", "MATCHED", "FILLED", "open", "OPEN") or (resp and not isinstance(resp, dict))
         status = "✅ filled" if filled else f"⚠️ not filled ({order_status or 'no response'})"
+        scan_log.add(signal.market_slug, signal.question, signal.price_now, "ORDER",
+                     f"{'filled' if filled else 'not filled'} — {signal.side} ${signal.amount_usd:.2f}",
+                     signal.triggers, signal.conviction)
 
         msg = (
             f"🏆 Trade Opened\n"
@@ -311,6 +319,12 @@ async def main() -> None:
     )
     scheduler.start()
 
+    # Dashboard — runs in the same event loop on Railway's PORT
+    dash_port = int(os.getenv("PORT", "8080"))
+    dash_cfg  = uvicorn.Config("dashboard:app", host="0.0.0.0", port=dash_port, log_level="warning")
+    asyncio.create_task(uvicorn.Server(dash_cfg).serve())
+    logger.info("Dashboard starting on port %d", dash_port)
+
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
@@ -340,4 +354,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
