@@ -13,7 +13,7 @@ import logging
 import os
 import random
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import aiohttp
 import colorlog
@@ -311,7 +311,9 @@ async def main() -> None:
         args=[client, app, pos_mgr], id="scan",
     )
     scheduler.add_job(
-        pos_mgr.check_positions, "interval", minutes=1, id="positions",
+        pos_mgr.check_positions, "interval", minutes=1,
+        start_date=datetime.now(timezone.utc) + timedelta(seconds=35),
+        id="positions",
     )
     scheduler.add_job(
         daily_report, "cron", hour=23, minute=55,
