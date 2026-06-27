@@ -225,3 +225,4 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         question[:50], side, price, market_slug or "NO-SLUG", label, amount,
     )
     return signal
+
