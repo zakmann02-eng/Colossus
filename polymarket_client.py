@@ -45,9 +45,11 @@ _BLOCKED = {
     # Over/under totals — block decimal line markets (e.g. "Under 2.5", "Over 1.5 goals")
     "over 0.", "over 1.", "over 2.", "over 3.", "over 4.", "over 5.",
     "under 0.", "under 1.", "under 2.", "under 3.", "under 4.", "under 5.",
-    "total runs", "total sets", "total games",
+    "total goals", "total runs", "total sets", "total games",
     # Award / multi-outcome markets — no binary YES/NO CLOB pricing
     "mvp", "most valuable", "award", "golden boot", "ballon d'or",
+    # Exact score markets — specific scoreline props, not binary outcomes
+    "exact score", "correct score", "scoreline",
 }
 
 
