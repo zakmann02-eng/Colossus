@@ -181,25 +181,22 @@ async def scan_markets(
         logger.info("Order raw response: %s", resp)
         order_status = (resp or {}).get("status", "") if isinstance(resp, dict) else ""
         filled = order_status in ("matched", "filled", "MATCHED", "FILLED", "open", "OPEN") or (resp and not isinstance(resp, dict))
-        status = "✅ filled" if filled else f"⚠️ not filled ({order_status or 'no response'})"
         scan_log.add(signal.market_slug, signal.question, signal.price_now, "ORDER",
                      f"{'filled' if filled else 'not filled'} — {signal.side} ${signal.amount_usd:.2f}",
                      signal.triggers, signal.conviction)
 
-        msg = (
-            f"🏆 Trade Opened\n"
-            f"{signal.question[:80]}\n\n"
-            f"Side: {signal.side} @ {signal.price_now:.3f}\n"
-            f"Amount: ${signal.amount_usd:.2f} ({signal.conviction} conviction)\n"
-            f"TP: {signal.tp_pct:.0%}  SL: {signal.sl_pct:.0%}\n"
-            f"Event date: {signal.event_date}\n"
-            f"Triggers: {', '.join(signal.triggers)}\n"
-            f"Score: {signal.score}/100\n"
-            f"Order: {status}"
-        )
-        await _send(app, msg)
-
         if filled:
+            msg = (
+                f"🏆 Trade Opened\n"
+                f"{signal.question[:80]}\n\n"
+                f"Side: {signal.side} @ {signal.price_now:.3f}\n"
+                f"Amount: ${signal.amount_usd:.2f} ({signal.conviction} conviction)\n"
+                f"TP: {signal.tp_pct:.0%}  SL: {signal.sl_pct:.0%}\n"
+                f"Event date: {signal.event_date}\n"
+                f"Triggers: {', '.join(signal.triggers)}\n"
+                f"Score: {signal.score}/100"
+            )
+            await _send(app, msg)
             position_mgr.record_entry(
                 signal.token_id, signal.market_slug, signal.side,
                 signal.price_now, signal.tp_pct, signal.sl_pct,
@@ -207,6 +204,16 @@ async def scan_markets(
                 conviction=signal.conviction,
                 triggers=signal.triggers,
             )
+        else:
+            status = order_status or "no response"
+            msg = (
+                f"⚠️ Signal fired — order not filled\n"
+                f"{signal.question[:80]}\n\n"
+                f"Side: {signal.side} @ {signal.price_now:.3f}\n"
+                f"Triggers: {', '.join(signal.triggers)}\n"
+                f"Status: {status}"
+            )
+            await _send(app, msg)
 
     if signals_fired == 0:
         logger.info("No signals this scan")
