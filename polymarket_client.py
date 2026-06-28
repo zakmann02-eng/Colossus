@@ -45,7 +45,7 @@ _BLOCKED = {
     # Over/under totals — block decimal line markets (e.g. "Under 2.5", "Over 1.5 goals")
     "over 0.", "over 1.", "over 2.", "over 3.", "over 4.", "over 5.",
     "under 0.", "under 1.", "under 2.", "under 3.", "under 4.", "under 5.",
-       "total goals", "total runs", "total sets", "total games",
+    "total runs", "total sets", "total games",
     # Award / multi-outcome markets — no binary YES/NO CLOB pricing
     "mvp", "most valuable", "award", "golden boot", "ballon d'or",
 }
@@ -432,13 +432,13 @@ class PolymarketClient:
             logger.info("Order response: %s", resp)
             return resp
         except AuthenticationError as exc:
-            logger.error("Auth error: %s", exc)
+            logger.error("Auth error placing order for %s: %s", market_slug, exc)
         except BadRequestError as exc:
-            logger.error("Bad request: %s", exc)
+            logger.error("Bad request placing order for %s: %s | payload=%s", market_slug, exc, order)
         except NotFoundError as exc:
             logger.error("Market not found (%s): %s", market_slug, exc)
         except Exception as exc:
-            logger.error("Order error: %s", exc)
+            logger.error("Order error (%s) for %s: %s | payload=%s", type(exc).__name__, market_slug, exc, order)
         return None
 
     async def close_position(
