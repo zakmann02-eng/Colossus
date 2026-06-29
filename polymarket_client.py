@@ -205,6 +205,17 @@ class PolymarketClient:
         try:
             all_markets: list[dict] = []
 
+            # Always scan the first 10 pages (offset 0–1800) to capture live/imminent
+            # sport markets that are indexed at the head of the event list. Without
+            # this, the cached-offset shortcut skips all current-day matches.
+            for head_off in range(0, 2000, 200):
+                head_events = await _fetch_page(head_off)
+                if not head_events:
+                    break
+                head_markets = _build_markets(head_events)
+                all_markets.extend(head_markets)
+                logger.info("Head scan offset=%d: +%d markets", head_off, len(head_markets))
+
             start_offset = max(0, self._upcoming_offset - 200)
             if start_offset > 0:
                 logger.info("Jumping to cached offset %d to find upcoming games", start_offset)
