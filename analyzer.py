@@ -7,15 +7,14 @@ Pre-filters (all must pass):
   - Resolution time must be known and within 7 days
   - CLOB last-trade price must exist (rejects illiquid prop markets)
 
-Requires 3+ triggers to fire a trade:
-  T1  Price outside 30-70% range (strong mispricing)
-  T2  Price moved >= 2% in last 15 min (significant momentum)
+Requires 3+ triggers to fire a trade. T5 is MANDATORY on every trade:
+  T1  Price outside 40-60% range (price bias signal)
+  T2  Price moved >= 1% in last 15 min (momentum)
   T3  24h volume > 2x daily average (unusual activity)
-  T5  Bookmaker consensus >= 3% edge over Polymarket price
+  T5  Bookmaker consensus >= 3% edge over Polymarket price [REQUIRED]
 
-  Note: T4 (resolves within 7 days) is a pre-filter only — it no longer
-  counts toward the trigger threshold because it fires on every eligible
-  market, adding no discriminating signal value.
+  T5 is the only signal with genuine edge (independent bookmaker data).
+  T1/T2/T3 serve as confirmation signals; T5 alone defines the trade direction.
 
 Position sizing by triggers fired:
   3 triggers → MED  → $0.35–$0.65 · TP 20% · SL 8%
@@ -41,7 +40,7 @@ MIN_PRICE    = 0.05
 MAX_PRICE    = 0.95
 MIN_VOL_24H  = 75.0
 MAX_DAYS_OUT = 7 * 86_400
-MIN_TRIGGERS = 2
+MIN_TRIGGERS = 3  # T5 + T1 + one of T2/T3 (T5 is mandatory)
 
 _skip_log_count = 0  # log first N skips at INFO so Railway shows why
 
@@ -53,7 +52,6 @@ T4_SECS = 7 * 86_400
 T5_MIN_EDGE = 0.03
 
 _TIERS = {
-    2: {"label": "LOW",  "min_usd": 0.10, "max_usd": 0.35, "tp": 0.15, "sl": 0.06},
     3: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.20, "sl": 0.08},
     4: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.25, "sl": 0.10},
 }
@@ -158,7 +156,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
             triggers.append(f"T2:move={move:.1%}")
 
     vol_all   = _safe_float(market.get("volume") or market.get("volumeNum"))
-    days_est  = max(1.0, _safe_float(market.get("daysAgo"), 7.0))
+    days_est  = max(1.0, _safe_float(market.get("daysAgo"), 30.0))  # default 30d prevents T3 over-firing on new markets
     daily_avg = vol_all / days_est if vol_all else 0
     if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
@@ -173,31 +171,22 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     except Exception as exc:
         logger.debug("T5 error: %s", exc)
 
+    # T5 is the only signal with genuine edge — require it on every trade.
+    # T1+T2 alone fires on noise; bookmaker confirmation is mandatory.
+    has_t5 = any(t.startswith("T5:") for t in triggers)
+    if not has_t5:
+        logger.debug("SKIP no-T5 (bookmaker confirmation required): %s", question[:60])
+        scan_log.add(market_slug, question, price, "SKIP",
+                     "no bookmaker edge (T5 required on all trades)", triggers)
+        return None
+
     if len(triggers) < MIN_TRIGGERS:
         logger.debug("SKIP triggers=%d (price=%.2f): %s", len(triggers), price, question[:60])
         scan_log.add(market_slug, question, price, "SKIP",
-                     f"only {len(triggers)} trigger(s) fired", triggers)
+                     f"only {len(triggers)} trigger(s) fired (need {MIN_TRIGGERS})", triggers)
         return None
 
-    # Must have at least one directional signal — T1 (price bias) or T5 (bookmaker edge).
-    # T2/T3/T4 alone only confirm activity, not which side to bet.
-    has_directional = any(t.startswith("T1:") or t.startswith("T5:") for t in triggers)
-    if not has_directional:
-        logger.debug("SKIP no-directional (T1/T5 absent): %s", question[:60])
-        scan_log.add(market_slug, question, price, "SKIP",
-                     "no directional signal (T1/T5 absent)", triggers)
-        return None
-
-    # For extreme prices (heavy favorites/underdogs), T5 bookmaker confirmation is required.
-    # T1 alone on a 70%+ favorite just finds correctly-priced markets and bets against them.
-    has_t5 = any(t.startswith("T5:") for t in triggers)
-    if (price > 0.70 or price < 0.30) and not has_t5:
-        logger.debug("SKIP extreme price(%.2f) without T5 confirmation: %s", price, question[:60])
-        scan_log.add(market_slug, question, price, "SKIP",
-                     f"extreme price ({price:.2f}) — T5 required", triggers)
-        return None
-
-    # Bookmaker's side defines the actual mispricing direction when available
+    # T5 defines trade direction; fall back to price bias only when T5 side is absent
     side               = bm_side if bm_side else _decide_side(price, market)
     amount, tp, sl, label = _size_position(len(triggers))
     score              = min(100, len(triggers) * 25)
