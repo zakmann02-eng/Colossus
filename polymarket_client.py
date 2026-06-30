@@ -377,7 +377,7 @@ class PolymarketClient:
             return 999.0
         except Exception as exc:
             logger.warning("get_balance failed: %s — assuming funds available", exc)
-            return 999.0
+            return 0.0
 
     async def get_open_positions(self):
         if not self._us_client:
