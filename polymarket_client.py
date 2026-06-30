@@ -216,8 +216,7 @@ class PolymarketClient:
                 all_markets.extend(head_markets)
                 logger.info("Head scan offset=%d: +%d markets", head_off, len(head_markets))
 
-            # Start after head-scan pages to avoid re-fetching offset 0-1800
-            start_offset = max(2000, self._upcoming_offset - 200)
+            start_offset = max(2000, self._upcoming_offset - 200)  # start after head scan pages
             if start_offset > 2000:
                 logger.info("Jumping to cached offset %d to find upcoming games", start_offset)
 
@@ -252,7 +251,7 @@ class PolymarketClient:
                 offset += 200
 
             if not found:
-                if start_offset > 2000:
+                if start_offset > 0:
                     logger.warning("No upcoming games at cached offset %d — resetting cache", start_offset)
                     self._upcoming_offset = 0
                     self._save_offset_cache(0)
@@ -291,8 +290,7 @@ class PolymarketClient:
                 if isinstance(game_raw, (int, float)):
                     game_ts = float(game_raw)
                 else:
-                    game_raw_str = str(game_raw).replace("Z", "+00:00")
-                    game_ts = datetime.fromisoformat(game_raw_str).timestamp()
+                    game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
                 now_ts = time.time()
                 if game_ts > now_ts + 7 * 86400:  # more than 7 days out
                     logger.debug("BLOCKED far-future: %s", (market.get("question") or "")[:60])
@@ -431,13 +429,17 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, amount_usd: float
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
-        intent   = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
-        quantity = max(1, round(amount_usd / price))
+        intent = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
+        # price is always the YES-token probability.
+        # For NO orders the CLOB expects the NO-token price (1 - YES price).
+        order_price = round(price, 4) if side == "YES" else round(1.0 - price, 4)
+        order_price = max(0.01, min(0.99, order_price))
+        quantity = max(1, round(amount_usd / order_price))
         order = {
             "marketSlug": market_slug,
             "intent":     intent,
             "type":       "ORDER_TYPE_LIMIT",
-            "price":      {"value": str(round(price, 4)), "currency": "USD"},
+            "price":      {"value": str(order_price), "currency": "USD"},
             "quantity":   quantity,
             "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
         }
@@ -460,6 +462,11 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, size_usd: float
     ) -> dict | None:
         close_side = "NO" if side == "YES" else "YES"
+        # price is the CLOB last-trade for the YES token.
+        # For a NO position (side=NO), close_side=YES: offer above the YES ask.
+        # For a YES position (side=YES), close_side=NO: offer above the NO ask (= below YES bid).
+        # The CLOB last-trade often defaults to 0.50 on thin books, so we also
+        # clamp to at least 0.10 away from the extremes to guarantee order acceptance.
         if close_side == "YES":
             aggressive_price = min(round(price + 0.10, 4), 0.95)
         else:
@@ -491,6 +498,7 @@ class PolymarketClient:
     async def get_market_price(self, market: dict, token_id: str) -> float | None:
         question = (market.get("question") or "")[:40]
 
+        # outcomePrices — skip if values are 0/1 (binary markers, not probabilities)
         op = market.get("outcomePrices")
         if op:
             try:
@@ -501,6 +509,7 @@ class PolymarketClient:
             except Exception:
                 pass
 
+        # marketSides — list of {side, price/probability} dicts
         sides = market.get("marketSides") or []
         logger.debug("marketSides for '%s': %r", question, sides)
         if sides:
@@ -530,6 +539,7 @@ class PolymarketClient:
             except Exception as exc:
                 logger.info("marketSides parse error: %s", exc)
 
+        # outcomes — list or dict
         outcomes = market.get("outcomes") or []
         logger.debug("outcomes for '%s': %r", question, outcomes)
         if outcomes:
@@ -594,6 +604,8 @@ class PolymarketClient:
     def seconds_to_resolution(self, market):
         raw = market.get("resolutionTime") or market.get("closeTime")
         if not raw:
+            # Prefer game start time over tournament endDate — avoids WC markets
+            # with endDate=July 19 being rejected by the 7-day MAX_DAYS_OUT filter.
             for gst_key in ("gameStartTime", "startTime"):
                 game_raw = market.get(gst_key)
                 if not game_raw:
@@ -606,6 +618,7 @@ class PolymarketClient:
                     return (game_ts + 4 * 3600) - time.time()
                 except Exception:
                     pass
+            # Last resort: endDate/startDate (tournament-level markets)
             raw = market.get("endDate") or market.get("startDate")
             if not raw:
                 return None
