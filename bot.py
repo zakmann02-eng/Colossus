@@ -2,18 +2,20 @@
 Colossus — autonomous Polymarket sports trading bot.
 
 Uses polymarket-us SDK for authenticated trading on Polymarket.US.
-Scans markets every 60s, fires on 2+ triggers, places up to $1 orders,
+Scans markets every 60s, fires on 3+ triggers (T5 required), places up to $1 orders,
 monitors positions for TP/SL every 1 min. Telegram alerts throughout.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, date, timezone, timedelta
+from pathlib import Path
 
 import aiohttp
 import colorlog
@@ -76,6 +78,30 @@ MAX_TRADES_SESSION = int(os.getenv("MAX_TRADES_SESSION", "10"))
 
 _traded_this_session: set[str] = set()
 _traded_events_this_session: set[str] = set()
+_DAILY_COUNT_FILE = Path("daily_count.json")
+
+
+def _load_daily_count() -> set[str]:
+    """Load today's traded market IDs — resets automatically on new calendar day."""
+    today = str(date.today())
+    try:
+        if _DAILY_COUNT_FILE.exists():
+            data = json.loads(_DAILY_COUNT_FILE.read_text())
+            if data.get("date") == today:
+                return set(data.get("traded", []))
+    except Exception:
+        pass
+    return set()
+
+
+def _save_daily_count() -> None:
+    try:
+        _DAILY_COUNT_FILE.write_text(json.dumps({
+            "date": str(date.today()),
+            "traded": list(_traded_this_session),
+        }))
+    except Exception:
+        pass
 
 
 # ── Telegram helpers ──────────────────────────────────────────────────────────
@@ -173,6 +199,7 @@ async def scan_markets(
         _traded_this_session.add(mid)
         if event_slug:
             _traded_events_this_session.add(event_slug)
+        _save_daily_count()
 
         resp = await client.place_market_order(
             signal.market_slug, signal.side, signal.price_now, signal.amount_usd
@@ -294,6 +321,11 @@ async def daily_report(app: Application, pos_mgr: PositionManager) -> None:
 
 async def main() -> None:
     logger.info("Colossus starting up…")
+
+    global _traded_this_session
+    _traded_this_session = _load_daily_count()
+    if _traded_this_session:
+        logger.info("Resumed daily trade count: %d trades today", len(_traded_this_session))
 
     session = aiohttp.ClientSession()
     client  = PolymarketClient(session, POLY_KEY_ID, POLY_SECRET_KEY)
