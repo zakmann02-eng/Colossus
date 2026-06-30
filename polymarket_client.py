@@ -216,13 +216,14 @@ class PolymarketClient:
                 all_markets.extend(head_markets)
                 logger.info("Head scan offset=%d: +%d markets", head_off, len(head_markets))
 
-            start_offset = max(0, self._upcoming_offset - 200)
-            if start_offset > 0:
+            # Start after head-scan pages to avoid re-fetching offset 0-1800
+            start_offset = max(2000, self._upcoming_offset - 200)
+            if start_offset > 2000:
                 logger.info("Jumping to cached offset %d to find upcoming games", start_offset)
 
             found = False
             offset = start_offset
-            max_offset = start_offset + 4000  # cap at ~20 extra pages to avoid API exhaustion
+            max_offset = start_offset + 30000  # WC/tennis markets can be at offset 15000+
 
             while offset <= max_offset:
                 page_events = await _fetch_page(offset)
@@ -251,7 +252,7 @@ class PolymarketClient:
                 offset += 200
 
             if not found:
-                if start_offset > 0:
+                if start_offset > 2000:
                     logger.warning("No upcoming games at cached offset %d — resetting cache", start_offset)
                     self._upcoming_offset = 0
                     self._save_offset_cache(0)
@@ -290,7 +291,8 @@ class PolymarketClient:
                 if isinstance(game_raw, (int, float)):
                     game_ts = float(game_raw)
                 else:
-                    game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
+                    game_raw_str = str(game_raw).replace("Z", "+00:00")
+                    game_ts = datetime.fromisoformat(game_raw_str).timestamp()
                 now_ts = time.time()
                 if game_ts > now_ts + 7 * 86400:  # more than 7 days out
                     logger.debug("BLOCKED far-future: %s", (market.get("question") or "")[:60])
