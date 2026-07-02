@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from sports_data import get_bookmaker_signal
+from performance_tracker import get_size_multiplier
 import scan_log
 
 if TYPE_CHECKING:
@@ -201,6 +202,17 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     side                  = bm_side if bm_side else _decide_side(price, market)
     amount, tp, sl, label = _size_position(effective_count)
     score                 = min(100, effective_count * 25)
+
+    # Apply learned multiplier from historical trigger performance.
+    # Neutral (1.0x) until MIN_SAMPLE trades exist for this trigger combo.
+    learned_mult = get_size_multiplier(triggers)
+    if learned_mult != 1.0:
+        import os
+        raw_amount = amount
+        lo = float(os.getenv("MIN_TRADE_USD", "0.10"))
+        hi = float(os.getenv("MAX_TRADE_USD", "1.00"))
+        amount = round(max(lo, min(hi, amount * learned_mult)), 2)
+        logger.info("Learned sizing applied: %.2f → %.2f (%.1fx)", raw_amount, amount, learned_mult)
 
     signal = TradeSignal(
         market_id   = market_id,
