@@ -141,9 +141,9 @@ _PROP_MARKET_KEYS: dict[str, str] = {
 # ── Cache ──────────────────────────────────────────────────────────────────────
 
 _cache: dict[str, tuple[float, list[dict]]] = {}
-_prop_cache: dict[str, tuple[float, dict]] = {}  # event_id:market → (ts, data)
+_prop_cache: dict[str, tuple[float, dict]] = {}
 _cache_lock = asyncio.Lock()
-_PROP_CACHE_TTL = 3600.0  # 1 hour for player props
+_PROP_CACHE_TTL = 3600.0
 
 
 def _detect_player_and_stat(question: str, sport_key: str) -> tuple[str, str] | None:
@@ -177,7 +177,7 @@ async def _fetch_player_prop_signal(
     if not events:
         return None
 
-    for event in events[:8]:  # check up to 8 events to find the player
+    for event in events[:8]:
         event_id = event.get("id")
         if not event_id:
             continue
@@ -210,7 +210,6 @@ async def _fetch_player_prop_signal(
                 logger.debug("Prop API error: %s", exc)
                 continue
 
-        # Search bookmakers for this player's prop
         probs: list[float] = []
         for bm in (prop_data or {}).get("bookmakers", []):
             for mkt in bm.get("markets", []):
@@ -261,10 +260,6 @@ def _american_to_prob(odds: int) -> float:
 
 
 def _extract_consensus_prob(outcomes: list[dict], target: str) -> float | None:
-    """
-    Average implied probability across all bookmakers for the given outcome name.
-    target is matched case-insensitively anywhere in the outcome name.
-    """
     target_l = target.lower()
     probs: list[float] = []
     for outcome in outcomes:
@@ -276,7 +271,6 @@ def _extract_consensus_prob(outcomes: list[dict], target: str) -> float | None:
             continue
         try:
             p = float(price)
-            # Decimal odds (>= 1.0) vs American odds
             if p >= 1.0:
                 probs.append(1.0 / p)
             else:
@@ -325,10 +319,6 @@ async def _fetch_sport_events(sport_key: str, session: aiohttp.ClientSession) ->
 
 
 def _find_matching_event(events: list[dict], question: str) -> dict | None:
-    """
-    Try to match a Polymarket question to an Odds API event.
-    Looks for team/player name overlap.
-    """
     q = question.lower()
     best: dict | None = None
     best_score = 0
@@ -341,7 +331,6 @@ def _find_matching_event(events: list[dict], question: str) -> dict | None:
             score += 2
         if away and away in q:
             score += 2
-        # Partial word match
         for part in home.split():
             if len(part) > 3 and part in q:
                 score += 1
@@ -385,7 +374,6 @@ async def get_bookmaker_signal(
 
     logger.info("T5 attempting: sport=%s key=%s q=%s", sport, sport_key, question[:50])
 
-    # Player prop path — check if this is a top-player stat market
     prop_info = _detect_player_and_stat(question, sport_key)
     if prop_info:
         player, stat = prop_info
@@ -402,7 +390,6 @@ async def get_bookmaker_signal(
         logger.info("T5: no event match in %d events for: %s", len(events), question[:60])
         return None
 
-    # Determine which team/player the Polymarket question is asking about
     home = event.get("home_team") or ""
     away = event.get("away_team") or ""
     q_lower = question.lower()
@@ -416,10 +403,6 @@ async def get_bookmaker_signal(
     if not target_team:
         return None
 
-    # Per-bookmaker vig-normalized consensus probability.
-    # For each bookmaker's h2h market: divide target team's implied prob by
-    # that bookmaker's total overround. Average normalized probs across bookmakers.
-    # This correctly handles 2-way and 3-way markets without inflating edges.
     bm_probs: list[float] = []
     target_l = target_team.lower()
     for bm in event.get("bookmakers", []):
