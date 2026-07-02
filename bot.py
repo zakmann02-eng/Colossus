@@ -28,6 +28,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from analyzer import evaluate_market
 from polymarket_client import PolymarketClient
 from position_manager import PositionManager
+from performance_tracker import get_performance_summary
 import scan_log
 
 load_dotenv()
@@ -314,6 +315,11 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(report)
 
 
+async def cmd_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    summary = get_performance_summary()
+    await update.message.reply_text(summary)
+
+
 async def daily_report(app: Application, pos_mgr: PositionManager) -> None:
     report = await pos_mgr.get_report()
     await _send(app, report)
@@ -344,6 +350,7 @@ async def main() -> None:
     app.add_handler(CommandHandler("pause",     cmd_pause))
     app.add_handler(CommandHandler("resume",    cmd_resume))
     app.add_handler(CommandHandler("report",    cmd_report))
+    app.add_handler(CommandHandler("learn",     cmd_learn))
     app.add_handler(CommandHandler("sellall",   cmd_sellall))
 
     scheduler = AsyncIOScheduler()
@@ -378,7 +385,7 @@ async def main() -> None:
         f"Mode: {mode}\n"
         f"Scanning every {SCAN_INTERVAL}s  TP {TP_PCT:.0%}  SL {SL_PCT:.0%}\n"
         f"Trade range: ${MIN_TRADE_USD:.2f}-${MAX_TRADE_USD:.2f}\n"
-        "Commands: /status /positions /report /pause /resume /sellall"
+        "Commands: /status /positions /report /learn /pause /resume /sellall"
     ))
 
     logger.info("Bot running. Press Ctrl+C to stop.")
