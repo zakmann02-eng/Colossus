@@ -22,14 +22,14 @@ _CSV_HEADERS    = [
     "timestamp", "market_slug", "side", "entry_price", "exit_price",
     "pnl_pct", "reason", "conviction", "triggers",
 ]
-_RESERVE_PCT = 0.10
+_RESERVE_PCT = 0.10  # 10% of each winning trade's profit goes to reserve
 
 
 @dataclass
 class _Entry:
     market_slug:  str
     side:         str
-    price:        float
+    price:        float   # token price (YES token for YES; NO token for NO)
     tp:           float
     sl:           float
     amount_usd:   float = 0.50
@@ -143,10 +143,15 @@ class PositionManager:
         conviction:  str   = "",
         triggers:    list | None = None,
     ) -> None:
+        # entry_price from the analyzer is the YES-token market price.
+        # Convert to the actual token price so CLOB comparisons are consistent:
+        #   YES position → store YES price (identity)
+        #   NO position  → store NO price (= 1 - YES price)
+        token_price = entry_price if side == "YES" else (1.0 - entry_price)
         self._entries[token_id] = _Entry(
             market_slug = market_slug,
             side        = side,
-            price       = entry_price,
+            price       = token_price,
             tp          = tp_pct if tp_pct is not None else self._default_tp,
             sl          = sl_pct if sl_pct is not None else self._default_sl,
             amount_usd  = amount_usd,
@@ -155,8 +160,9 @@ class PositionManager:
         )
         self._save()
         logger.info(
-            "Recorded entry: slug=%s side=%s price=%.3f TP=%.0f%% SL=%.0f%% conviction=%s",
-            market_slug, side, entry_price,
+            "Recorded entry: slug=%s side=%s YES_price=%.3f token_price=%.3f "
+            "TP=%.0f%% SL=%.0f%% conviction=%s",
+            market_slug, side, entry_price, token_price,
             (tp_pct or self._default_tp) * 100,
             (sl_pct or self._default_sl) * 100,
             conviction,
@@ -227,27 +233,31 @@ class PositionManager:
             cost_val = float(
                 cost.get("value") if isinstance(cost, dict) else cost or 0
             )
-            entry_price = float(
+            # avgPrice from exchange API is typically the YES-side probability price.
+            yes_price = float(
                 pos.get("avgPrice") or pos.get("price") or
                 (cost_val / abs(net) if abs(net) > 0 else 0.50)
             )
-            if entry_price <= 0:
-                entry_price = 0.50
+            if yes_price <= 0:
+                yes_price = 0.50
+
+            # Convert to token price for consistent P&L tracking
+            token_price = yes_price if side == "YES" else (1.0 - yes_price)
 
             self._entries[token_id] = _Entry(
                 market_slug = slug,
                 side        = side,
-                price       = entry_price,
+                price       = token_price,
                 tp          = self._default_tp,
                 sl          = self._default_sl,
-                amount_usd  = cost_val or abs(net) * entry_price,
+                amount_usd  = cost_val or abs(net) * yes_price,
                 conviction  = "SYNCED",
                 triggers    = "exchange_sync",
             )
             tracked_slugs.add(slug)
             logger.info(
-                "sync_from_exchange: registered %s side=%s price=%.3f",
-                slug, side, entry_price,
+                "sync_from_exchange: registered %s side=%s yes_price=%.3f token_price=%.3f",
+                slug, side, yes_price, token_price,
             )
 
         self._save()
@@ -277,12 +287,11 @@ class PositionManager:
                 self._save()
                 continue
 
-            # CLOB is the primary price source (rejects slugs < 32 chars automatically)
+            # CLOB last-trade price for this specific token (YES or NO)
             current_price = await self._client.get_current_price(token_id)
 
             if current_price is None:
-                # token_id is likely a slug from exchange sync — fall back to portfolio price.
-                # Portfolio currentPrice is the YES-token probability; adjust for NO positions.
+                # Fallback to portfolio YES price; convert to token space.
                 pos_data = live_by_slug.get(entry.market_slug, {})
                 yes_price = float(pos_data.get("currentPrice") or pos_data.get("price") or 0)
                 if yes_price > 0 and abs(yes_price - 0.500) > 0.02:
@@ -296,14 +305,18 @@ class PositionManager:
                                 entry.market_slug, str(token_id)[:16])
                     continue
 
+            # 0.500 is the CLOB sentinel for thin books with no real trades.
             if abs(current_price - 0.500) < 0.001:
                 logger.info("Price is 0.500 sentinel for %s — skipping TP/SL", entry.market_slug)
                 continue
 
+            # P&L in token-price space — entry.price and current_price are both token prices.
             pnl = (current_price - entry.price) / entry.price
-            logger.info("TP/SL check %s: price=%.3f entry=%.3f pnl=%+.1f%% TP=%.0f%% SL=%.0f%%",
-                        entry.market_slug, current_price, entry.price, pnl * 100,
-                        entry.tp * 100, entry.sl * 100)
+            logger.info(
+                "TP/SL check %s: side=%s token_price=%.3f entry=%.3f pnl=%+.1f%% TP=%.0f%% SL=%.0f%%",
+                entry.market_slug, entry.side, current_price, entry.price,
+                pnl * 100, entry.tp * 100, entry.sl * 100,
+            )
 
             if pnl >= entry.tp:
                 await self._close(token_id, entry, current_price, f"TP +{pnl:.1%}")
@@ -313,6 +326,7 @@ class PositionManager:
     async def _close(
         self, token_id: str, entry: _Entry, current_price: float, reason: str
     ) -> None:
+        # current_price is the token price (YES for YES positions, NO for NO positions).
         pnl = (current_price - entry.price) / entry.price
         resp = await self._client.close_position(
             entry.market_slug, entry.side, current_price, entry.amount_usd
@@ -393,14 +407,19 @@ class PositionManager:
         for token_id, entry in self._entries.items():
             pos = live_by_slug.get(entry.market_slug)
             if pos:
-                current_price = float(pos.get("currentPrice") or pos.get("price") or entry.price)
+                # Portfolio returns YES price; convert to token space for P&L.
+                yes_price = float(pos.get("currentPrice") or pos.get("price") or 0)
+                if yes_price > 0:
+                    current_token = yes_price if entry.side == "YES" else (1.0 - yes_price)
+                else:
+                    current_token = entry.price
             else:
-                current_price = entry.price
-            pnl = (current_price - entry.price) / entry.price
+                current_token = entry.price
+            pnl = (current_token - entry.price) / entry.price
             emoji = "🟢" if pnl >= 0 else "🔴"
             lines.append(
                 f"{emoji} {entry.market_slug[:24]}  {entry.side} "
-                f"@ {entry.price:.3f} → {current_price:.3f} ({pnl:+.1%}) "
+                f"@ {entry.price:.3f} → {current_token:.3f} ({pnl:+.1%}) "
                 f"[{entry.conviction}]"
             )
 
