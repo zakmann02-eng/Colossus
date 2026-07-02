@@ -450,10 +450,21 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, size_usd: float
     ) -> dict | None:
         close_side = "NO" if side == "YES" else "YES"
+        # `price` is get_current_price(token_id) — the price of the token we HOLD.
+        # For YES positions: price = YES token price.
+        # For NO positions:  price = NO token price = 1 - YES price.
         if close_side == "YES":
-            aggressive_price = min(round(price + 0.10, 4), 0.95)
+            # Closing a NO position by buying YES.
+            # Convert NO-token price to YES space, then bid aggressively above it.
+            yes_equiv = 1.0 - price
+            aggressive_price = min(round(yes_equiv + 0.10, 4), 0.95)
         else:
+            # Closing a YES position by buying NO.
             aggressive_price = max(round(price - 0.10, 4), 0.05)
+        logger.info(
+            "close_position: side=%s price=%.3f close_side=%s aggressive=%.3f",
+            side, price, close_side, aggressive_price,
+        )
         return await self.place_market_order(market_slug, close_side, aggressive_price, size_usd)
 
     # ---------------------------------------------------------------- #
