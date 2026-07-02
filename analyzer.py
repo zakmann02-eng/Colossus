@@ -5,9 +5,8 @@ Pre-filters (all must pass):
   - Price between 0.05 and 0.95
   - Minimum $75 24h volume
   - Resolution time must be known and within 7 days
-  - CLOB last-trade price must exist (rejects illiquid prop markets)
 
-Requires 2+ triggers to fire a trade:
+Requires 2+ effective triggers to fire a trade:
   T1  Price outside 45-55% range (price bias signal)
   T2  Price moved >= 0.5% in last 15 min (momentum)
   T3  24h volume > 2x daily average (unusual activity)
@@ -17,7 +16,7 @@ Requires 2+ triggers to fire a trade:
   defines trade direction, and pushes to HIGH conviction.
   T1/T2/T3 can fire a trade independently with any 2 of them.
 
-Position sizing by triggers fired:
+Position sizing by effective triggers fired:
   2 triggers → LOW  → $0.20–$0.35 · TP 15% · SL 6%
   3 triggers → MED  → $0.35–$0.65 · TP 20% · SL 8%
   4+ triggers→ HIGH → $0.65–$1.00 · TP 25% · SL 10%
@@ -48,9 +47,8 @@ _skip_log_count = 0  # log first N skips at INFO so Railway shows why
 
 T1_LOW  = 0.45
 T1_HIGH = 0.55
-T2_MOVE = 0.005  # 0.5% — was 1%
+T2_MOVE = 0.005  # 0.5% momentum threshold
 T3_MULT = 2.0
-T4_SECS = 7 * 86_400
 T5_MIN_EDGE = 0.03
 
 _TIERS = {
@@ -107,30 +105,37 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
 
     secs = client.seconds_to_resolution(market)
     if secs is None:
-        if _skip_log_count < 30:
+        if _skip_log_count < 10:
             _skip_log_count += 1
             logger.info("SKIP no-date [diag]: slug=%s q=%s", market_slug[:30], question[:50])
         else:
             logger.debug("SKIP no-date: %s", question[:60])
         return None
-    if secs <= 0 or secs > MAX_DAYS_OUT:
-        if _skip_log_count < 30:
-            _skip_log_count += 1
-            logger.info("SKIP time(%.1fd) [diag]: slug=%s q=%s", secs / 86400, market_slug[:30], question[:50])
-        else:
-            logger.debug("SKIP time(%.1fd): %s", secs / 86400, question[:60])
+
+    # Past games and far-future markets go to debug — they're expected and burn INFO quota
+    if secs <= 0:
+        logger.debug("SKIP past(%.1fd): %s", secs / 86400, question[:60])
+        return None
+    if secs > MAX_DAYS_OUT:
+        logger.debug("SKIP far-future(%.1fd): %s", secs / 86400, question[:60])
         return None
 
     vol_24h = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
     if vol_24h < MIN_VOL_24H:
-        logger.debug("SKIP vol(%.0f): %s", vol_24h, question[:60])
+        if _skip_log_count < 10:
+            _skip_log_count += 1
+            logger.info("SKIP vol(%.0f < %.0f) [diag]: slug=%s q=%s",
+                        vol_24h, MIN_VOL_24H, market_slug[:30], question[:50])
+        else:
+            logger.debug("SKIP vol(%.0f): %s", vol_24h, question[:60])
         return None
 
     price = await client.get_market_price(market, token_id)
     if not price:
-        if _skip_log_count < 30:
+        if _skip_log_count < 10:
             _skip_log_count += 1
-            logger.info("SKIP no-price [diag]: slug=%s token=%s q=%s", market_slug[:30], str(token_id)[:20], question[:50])
+            logger.info("SKIP no-price [diag]: slug=%s token=%s q=%s",
+                        market_slug[:30], str(token_id)[:20], question[:50])
         else:
             logger.debug("SKIP no-price: %s", question[:60])
         return None
@@ -139,17 +144,18 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         logger.debug("SKIP price(%.3f): %s", price, question[:60])
         return None
 
-    # Require a real CLOB last-trade price — illiquid prop markets return None here,
-    # which means TP/SL could never trigger after entry.
+    # CLOB last-trade price check — log but do NOT hard-block.
+    # TP/SL falls back to portfolio price when CLOB is unavailable.
     clob_price = await client.get_current_price(token_id)
     if clob_price is None:
-        if _skip_log_count < 30:
+        if _skip_log_count < 10:
             _skip_log_count += 1
-            logger.info("SKIP illiquid (no CLOB last-trade) [diag]: slug=%s q=%s", market_slug[:30], question[:50])
+            logger.info("WARN illiquid (no CLOB last-trade) [diag]: slug=%s q=%s",
+                        market_slug[:30], question[:50])
         else:
-            logger.debug("SKIP illiquid (no CLOB last-trade): %s", question[:60])
-        scan_log.add(market_slug, question, price, "SKIP", "illiquid — no CLOB last-trade price", [])
-        return None
+            logger.debug("WARN illiquid (no CLOB last-trade): %s", question[:60])
+        scan_log.add(market_slug, question, price, "WARN", "no CLOB last-trade — continuing", [])
+        # Continue evaluation — position_manager has portfolio price fallback for TP/SL
 
     triggers: list[str] = []
 
@@ -163,12 +169,12 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
             triggers.append(f"T2:move={move:.1%}")
 
     vol_all   = _safe_float(market.get("volume") or market.get("volumeNum"))
-    days_est  = max(1.0, _safe_float(market.get("daysAgo"), 30.0))  # default 30d prevents T3 over-firing on new markets
+    days_est  = max(1.0, _safe_float(market.get("daysAgo"), 30.0))
     daily_avg = vol_all / days_est if vol_all else 0
     if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
 
-    # T5: bookmaker consensus diverges from Polymarket by >= 3% — primary edge signal
+    # T5: bookmaker consensus diverges from Polymarket by >= 3%
     bm_side: str | None = None
     try:
         bm_result = await get_bookmaker_signal(market, price, client._session)
@@ -179,18 +185,19 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         logger.debug("T5 error: %s", exc)
 
     # T5 counts as 2 triggers — bookmaker edge is a confirmed external signal.
-    # A T5 fire alone (effective_count=2) is sufficient to trade.
+    # A lone T5 (effective_count=2) is sufficient to trade.
     has_t5 = any(t.startswith("T5:") for t in triggers)
     effective_count = len(triggers) + (1 if has_t5 else 0)
 
     if effective_count < MIN_TRIGGERS:
-        logger.debug("SKIP triggers=%d effective=%d (price=%.2f): %s", len(triggers), effective_count, price, question[:60])
+        logger.debug("SKIP triggers=%d effective=%d (price=%.2f): %s",
+                     len(triggers), effective_count, price, question[:60])
         scan_log.add(market_slug, question, price, "SKIP",
-                     f"only {len(triggers)} trigger(s) fired (effective={effective_count}, need {MIN_TRIGGERS})", triggers)
+                     f"only {len(triggers)} trigger(s) fired (effective={effective_count}, need {MIN_TRIGGERS})",
+                     triggers)
         return None
 
-    # T5 defines trade direction when available (genuine bookmaker edge);
-    # fall back to price bias when T5 didn't fire or had no side.
+    # T5 defines trade direction when available; fall back to price bias.
     side                  = bm_side if bm_side else _decide_side(price, market)
     amount, tp, sl, label = _size_position(effective_count)
     score                 = min(100, effective_count * 25)
