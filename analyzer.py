@@ -8,7 +8,7 @@ Pre-filters (all must pass):
   - CLOB last-trade price must exist (rejects illiquid prop markets)
 
 Requires 2+ triggers to fire a trade:
-  T1  Price outside 40-60% range (price bias signal)
+  T1  Price outside 45-55% range (price bias signal)
   T2  Price moved >= 1% in last 15 min (momentum)
   T3  24h volume > 2x daily average (unusual activity)
   T5  Bookmaker consensus >= 3% edge over Polymarket price (bonus signal)
@@ -45,8 +45,8 @@ MIN_TRIGGERS = 2
 
 _skip_log_count = 0
 
-T1_LOW  = 0.40
-T1_HIGH = 0.60
+T1_LOW  = 0.45
+T1_HIGH = 0.55
 T2_MOVE = 0.01
 T3_MULT = 2.0
 T4_SECS = 7 * 86_400
