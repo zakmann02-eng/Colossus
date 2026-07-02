@@ -42,10 +42,10 @@ _BLOCKED = {
     "strikeouts", "home runs", "hits and runs",
     "anytime scorer", "first scorer", "last scorer",
     "to score 2+", "to score 3+", "to record",
-    # Over/under totals — block decimal line markets (e.g. "Under 2.5", "Over 1.5 goals")
+    # Over/under totals — block decimal line markets (e.g. "Under 2.5", "Over 1.5 goals", "O/U 3.5")
     "over 0.", "over 1.", "over 2.", "over 3.", "over 4.", "over 5.",
     "under 0.", "under 1.", "under 2.", "under 3.", "under 4.", "under 5.",
-    "total goals", "total runs", "total sets", "total games",
+    "o/u", " ou ", "total goals", "total runs", "total sets", "total games",
     # Award / multi-outcome markets — no binary YES/NO CLOB pricing
     "mvp", "most valuable", "award", "golden boot", "ballon d'or",
     # Exact score markets — specific scoreline props, not binary outcomes
@@ -170,9 +170,6 @@ class PolymarketClient:
         now_ts = time.time()
 
         def _upcoming_in(markets):
-            # Only stop pagination when gameStartTime is within the next 7 days.
-            # Other date fields (startDate/startTime/endDate) represent market resolution
-            # dates, not actual game times, and cause false positives on stale markets.
             window = now_ts + 7 * 86_400
             for m in markets:
                 raw = m.get("gameStartTime")
@@ -205,9 +202,6 @@ class PolymarketClient:
         try:
             all_markets: list[dict] = []
 
-            # Always scan the first 10 pages (offset 0–1800) to capture live/imminent
-            # sport markets that are indexed at the head of the event list. Without
-            # this, the cached-offset shortcut skips all current-day matches.
             for head_off in range(0, 2000, 200):
                 head_events = await _fetch_page(head_off)
                 if not head_events:
@@ -216,13 +210,13 @@ class PolymarketClient:
                 all_markets.extend(head_markets)
                 logger.info("Head scan offset=%d: +%d markets", head_off, len(head_markets))
 
-            start_offset = max(2000, self._upcoming_offset - 200)  # start after head scan pages
+            start_offset = max(2000, self._upcoming_offset - 200)
             if start_offset > 2000:
                 logger.info("Jumping to cached offset %d to find upcoming games", start_offset)
 
             found = False
             offset = start_offset
-            max_offset = start_offset + 30000  # WC/tennis markets can be at offset 15000+
+            max_offset = start_offset + 30000
 
             while offset <= max_offset:
                 page_events = await _fetch_page(offset)
@@ -281,9 +275,6 @@ class PolymarketClient:
         if event_state in ("FINAL", "COMPLETED", "POST_GAME", "POSTGAME", "ENDED", "RESOLVED"):
             return False
 
-        # Only block markets > 7 days out (too speculative).
-        # Don't filter on past gameStartTime — long matches (tennis, baseball) can
-        # run 3–5 hours, and eventState + CLOB liquidity already catch resolved markets.
         game_raw = market.get("gameStartTime")
         if game_raw:
             try:
@@ -292,7 +283,7 @@ class PolymarketClient:
                 else:
                     game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
                 now_ts = time.time()
-                if game_ts > now_ts + 7 * 86400:  # more than 7 days out
+                if game_ts > now_ts + 7 * 86400:
                     logger.debug("BLOCKED far-future: %s", (market.get("question") or "")[:60])
                     return False
             except Exception:
@@ -339,9 +330,6 @@ class PolymarketClient:
             return None
 
     async def get_current_price(self, token_id):
-        # Only use last-trade-price — bid/ask midpoint defaults to 0.5 on thin books
-        # and causes phantom TP triggers.
-        # Reject slugs — only real 32-char hex CLOB token IDs return meaningful prices.
         if not token_id or len(str(token_id)) < 32:
             return None
         data = await self._get(f"{CLOB_API}/last-trade-price", params={"token_id": token_id})
@@ -462,11 +450,6 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, size_usd: float
     ) -> dict | None:
         close_side = "NO" if side == "YES" else "YES"
-        # price is the CLOB last-trade for the YES token.
-        # For a NO position (side=NO), close_side=YES: offer above the YES ask.
-        # For a YES position (side=YES), close_side=NO: offer above the NO ask (= below YES bid).
-        # The CLOB last-trade often defaults to 0.50 on thin books, so we also
-        # clamp to at least 0.10 away from the extremes to guarantee order acceptance.
         if close_side == "YES":
             aggressive_price = min(round(price + 0.10, 4), 0.95)
         else:
@@ -498,7 +481,6 @@ class PolymarketClient:
     async def get_market_price(self, market: dict, token_id: str) -> float | None:
         question = (market.get("question") or "")[:40]
 
-        # outcomePrices — skip if values are 0/1 (binary markers, not probabilities)
         op = market.get("outcomePrices")
         if op:
             try:
@@ -509,7 +491,6 @@ class PolymarketClient:
             except Exception:
                 pass
 
-        # marketSides — list of {side, price/probability} dicts
         sides = market.get("marketSides") or []
         logger.debug("marketSides for '%s': %r", question, sides)
         if sides:
@@ -539,7 +520,6 @@ class PolymarketClient:
             except Exception as exc:
                 logger.info("marketSides parse error: %s", exc)
 
-        # outcomes — list or dict
         outcomes = market.get("outcomes") or []
         logger.debug("outcomes for '%s': %r", question, outcomes)
         if outcomes:
@@ -604,8 +584,6 @@ class PolymarketClient:
     def seconds_to_resolution(self, market):
         raw = market.get("resolutionTime") or market.get("closeTime")
         if not raw:
-            # Prefer game start time over tournament endDate — avoids WC markets
-            # with endDate=July 19 being rejected by the 7-day MAX_DAYS_OUT filter.
             for gst_key in ("gameStartTime", "startTime"):
                 game_raw = market.get(gst_key)
                 if not game_raw:
@@ -618,7 +596,6 @@ class PolymarketClient:
                     return (game_ts + 4 * 3600) - time.time()
                 except Exception:
                     pass
-            # Last resort: endDate/startDate (tournament-level markets)
             raw = market.get("endDate") or market.get("startDate")
             if not raw:
                 return None
