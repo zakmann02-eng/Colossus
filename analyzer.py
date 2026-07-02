@@ -7,16 +7,17 @@ Pre-filters (all must pass):
   - Resolution time must be known and within 7 days
   - CLOB last-trade price must exist (rejects illiquid prop markets)
 
-Requires 3+ triggers to fire a trade:
+Requires 2+ triggers to fire a trade:
   T1  Price outside 40-60% range (price bias signal)
   T2  Price moved >= 1% in last 15 min (momentum)
   T3  24h volume > 2x daily average (unusual activity)
   T5  Bookmaker consensus >= 3% edge over Polymarket price (bonus signal)
 
   T5 is a high-value bonus: when it fires it defines trade direction and
-  pushes to HIGH conviction. T1/T2/T3 can fire a trade independently.
+  pushes to higher conviction. T1/T2/T3 can fire a trade independently.
 
 Position sizing by triggers fired:
+  2 triggers → LOW  → $0.20–$0.35 · TP 15% · SL 6%
   3 triggers → MED  → $0.35–$0.65 · TP 20% · SL 8%
   4+ triggers→ HIGH → $0.65–$1.00 · TP 25% · SL 10%
 """
@@ -40,7 +41,7 @@ MIN_PRICE    = 0.05
 MAX_PRICE    = 0.95
 MIN_VOL_24H  = 75.0
 MAX_DAYS_OUT = 7 * 86_400
-MIN_TRIGGERS = 3
+MIN_TRIGGERS = 2
 
 _skip_log_count = 0
 
@@ -52,6 +53,7 @@ T4_SECS = 7 * 86_400
 T5_MIN_EDGE = 0.03
 
 _TIERS = {
+    2: {"label": "LOW",  "min_usd": 0.20, "max_usd": 0.35, "tp": 0.15, "sl": 0.06},
     3: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.20, "sl": 0.08},
     4: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.25, "sl": 0.10},
 }
