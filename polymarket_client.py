@@ -418,8 +418,6 @@ class PolymarketClient:
     ) -> dict | None:
         from polymarket_us import AuthenticationError, BadRequestError, NotFoundError
         intent = "ORDER_INTENT_BUY_LONG" if side == "YES" else "ORDER_INTENT_BUY_SHORT"
-        # price is always the YES-token probability.
-        # For NO orders the CLOB expects the NO-token price (1 - YES price).
         order_price = round(price, 4) if side == "YES" else round(1.0 - price, 4)
         order_price = max(0.01, min(0.99, order_price))
         quantity = max(1, round(amount_usd / order_price))
@@ -450,16 +448,10 @@ class PolymarketClient:
         self, market_slug: str, side: str, price: float, size_usd: float
     ) -> dict | None:
         close_side = "NO" if side == "YES" else "YES"
-        # `price` is get_current_price(token_id) — the price of the token we HOLD.
-        # For YES positions: price = YES token price.
-        # For NO positions:  price = NO token price = 1 - YES price.
         if close_side == "YES":
-            # Closing a NO position by buying YES.
-            # Convert NO-token price to YES space, then bid aggressively above it.
             yes_equiv = 1.0 - price
             aggressive_price = min(round(yes_equiv + 0.10, 4), 0.95)
         else:
-            # Closing a YES position by buying NO.
             aggressive_price = max(round(price - 0.10, 4), 0.05)
         logger.info(
             "close_position: side=%s price=%.3f close_side=%s aggressive=%.3f",
