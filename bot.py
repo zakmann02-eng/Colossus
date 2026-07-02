@@ -128,6 +128,8 @@ async def scan_markets(
         return
 
     logger.info("Scanning markets…")
+    import analyzer as _analyzer
+    _analyzer._skip_log_count = 0  # reset per scan so skip reasons stay visible in logs
     balance = await client.get_balance()
     reserve = position_mgr.get_reserve()
     tradeable = balance - reserve
