@@ -22,14 +22,14 @@ _CSV_HEADERS    = [
     "timestamp", "market_slug", "side", "entry_price", "exit_price",
     "pnl_pct", "reason", "conviction", "triggers",
 ]
-_RESERVE_PCT = 0.10  # 10% of each winning trade's profit goes to reserve
+_RESERVE_PCT = 0.10
 
 
 @dataclass
 class _Entry:
     market_slug:  str
     side:         str
-    price:        float   # token price (YES token for YES; NO token for NO)
+    price:        float
     tp:           float
     sl:           float
     amount_usd:   float = 0.50
@@ -193,7 +193,7 @@ class PositionManager:
             self._save()
             logger.info("update_token_ids_from_markets: updated %d position(s)", updated)
 
-    # ── Exchange sync (runs every check cycle) ─────────────────────────────────
+    # ── Exchange sync ──────────────────────────────────────────────────────────
 
     async def sync_from_exchange(self) -> None:
         try:
@@ -297,9 +297,20 @@ class PositionManager:
                                 entry.market_slug, str(token_id)[:16])
                     continue
 
+            # 0.500 sentinel — CLOB has no real trades yet (pre-game thin book).
+            # Try portfolio price fallback before giving up.
             if abs(current_price - 0.500) < 0.001:
-                logger.info("Price is 0.500 sentinel for %s — skipping TP/SL", entry.market_slug)
-                continue
+                pos_data = live_by_slug.get(entry.market_slug, {})
+                yes_price = float(pos_data.get("currentPrice") or pos_data.get("price") or 0)
+                if yes_price > 0 and abs(yes_price - 0.500) > 0.02:
+                    current_price = (1.0 - yes_price) if entry.side == "NO" else yes_price
+                    logger.info(
+                        "0.500 sentinel fallback %s: side=%s yes=%.3f → token_price=%.3f entry=%.3f",
+                        entry.market_slug, entry.side, yes_price, current_price, entry.price,
+                    )
+                else:
+                    logger.info("Price is 0.500 sentinel for %s — skipping TP/SL", entry.market_slug)
+                    continue
 
             pnl = (current_price - entry.price) / entry.price
             logger.info(
@@ -360,7 +371,7 @@ class PositionManager:
             logger.error("Failed to send close notification: %s", exc)
         logger.info("Closed position %s: %s", entry.market_slug, reason)
 
-    # ── Partial close (sell half on strong TP) ─────────────────────────────────
+    # ── Partial close ──────────────────────────────────────────────────────────
 
     async def sell_half(self, token_id: str, entry: _Entry, current_price: float) -> None:
         half_usd = entry.amount_usd / 2
