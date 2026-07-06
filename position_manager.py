@@ -293,7 +293,7 @@ class PositionManager:
             if current_price is None:
                 # Fallback to portfolio YES price; convert to token space.
                 pos_data = live_by_slug.get(entry.market_slug, {})
-                yes_price = float(pos_data.get("currentPrice") or pos_data.get("price") or 0)
+                yes_price = float(pos_data.get("currentPrice") or pos_data.get("avgPrice") or pos_data.get("price") or 0)
                 if yes_price > 0 and abs(yes_price - 0.500) > 0.02:
                     current_price = (1.0 - yes_price) if entry.side == "NO" else yes_price
                     logger.info(
@@ -308,7 +308,7 @@ class PositionManager:
             # 0.500 is the CLOB sentinel for thin books with no real trades.
             if abs(current_price - 0.500) < 0.001:
                 pos_data = live_by_slug.get(entry.market_slug, {})
-                yes_price = float(pos_data.get("currentPrice") or pos_data.get("price") or 0)
+                yes_price = float(pos_data.get("currentPrice") or pos_data.get("avgPrice") or pos_data.get("price") or 0)
                 if yes_price > 0 and abs(yes_price - 0.500) > 0.02:
                     current_price = (1.0 - yes_price) if entry.side == "NO" else yes_price
                     logger.info(
