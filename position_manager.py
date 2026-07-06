@@ -276,9 +276,14 @@ class PositionManager:
         positions = await self._client.get_open_positions()
         exchange_has_data = len(positions) > 0
         live_by_slug = {
-            (p.get("marketSlug") or p.get("slug") or ""): p
+            (p.get("marketSlug") or p.get("slug") or p.get("market_slug") or ""): p
             for p in positions
         }
+        if positions:
+            sample = positions[0]
+            logger.info("Portfolio position keys: %s | avgPrice=%s avg_price=%s currentPrice=%s price=%s",
+                        list(sample.keys()), sample.get("avgPrice"), sample.get("avg_price"),
+                        sample.get("currentPrice"), sample.get("price"))
 
         for token_id, entry in list(self._entries.items()):
             if exchange_has_data and entry.market_slug not in live_by_slug:
@@ -293,7 +298,7 @@ class PositionManager:
             if current_price is None:
                 # Fallback to portfolio YES price; convert to token space.
                 pos_data = live_by_slug.get(entry.market_slug, {})
-                yes_price = float(pos_data.get("currentPrice") or pos_data.get("avgPrice") or pos_data.get("price") or 0)
+                yes_price = float(pos_data.get("currentPrice") or pos_data.get("avgPrice") or pos_data.get("avg_price") or pos_data.get("price") or 0)
                 if yes_price > 0 and abs(yes_price - 0.500) > 0.02:
                     current_price = (1.0 - yes_price) if entry.side == "NO" else yes_price
                     logger.info(
@@ -308,7 +313,7 @@ class PositionManager:
             # 0.500 is the CLOB sentinel for thin books with no real trades.
             if abs(current_price - 0.500) < 0.001:
                 pos_data = live_by_slug.get(entry.market_slug, {})
-                yes_price = float(pos_data.get("currentPrice") or pos_data.get("avgPrice") or pos_data.get("price") or 0)
+                yes_price = float(pos_data.get("currentPrice") or pos_data.get("avgPrice") or pos_data.get("avg_price") or pos_data.get("price") or 0)
                 if yes_price > 0 and abs(yes_price - 0.500) > 0.02:
                     current_price = (1.0 - yes_price) if entry.side == "NO" else yes_price
                     logger.info(
