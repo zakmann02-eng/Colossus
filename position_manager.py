@@ -59,7 +59,7 @@ class PositionManager:
         self._load()
         self._load_reserve()
 
-    # ── Persistence ────────────────────────────────────────────────────────────
+    # ââ Persistence ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def _load(self) -> None:
         if not _POSITIONS_FILE.exists():
@@ -129,7 +129,7 @@ class PositionManager:
         except Exception as exc:
             logger.warning("Could not write trade_log.csv: %s", exc)
 
-    # ── Entry recording ────────────────────────────────────────────────────────
+    # ââ Entry recording ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def record_entry(
         self,
@@ -145,8 +145,8 @@ class PositionManager:
     ) -> None:
         # entry_price from the analyzer is the YES-token market price.
         # Convert to the actual token price so CLOB comparisons are consistent:
-        #   YES position → store YES price (identity)
-        #   NO position  → store NO price (= 1 - YES price)
+        #   YES position â store YES price (identity)
+        #   NO position  â store NO price (= 1 - YES price)
         token_price = entry_price if side == "YES" else (1.0 - entry_price)
         self._entries[token_id] = _Entry(
             market_slug = market_slug,
@@ -171,7 +171,7 @@ class PositionManager:
     def has_position(self, market_slug: str) -> bool:
         return any(e.market_slug == market_slug for e in self._entries.values())
 
-    # ── Token ID resolution ────────────────────────────────────────────────────
+    # ââ Token ID resolution ââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def update_token_ids_from_markets(self, markets: list, client) -> None:
         slug_to_token: dict[str, str] = {}
@@ -191,13 +191,13 @@ class PositionManager:
                 self._entries[real_token_id] = entry
                 del self._entries[old_token_id]
                 updated += 1
-                logger.info("token_id updated for %s: %s…", entry.market_slug, real_token_id[:16])
+                logger.info("token_id updated for %s: %sâ¦", entry.market_slug, real_token_id[:16])
 
         if updated:
             self._save()
             logger.info("update_token_ids_from_markets: updated %d position(s)", updated)
 
-    # ── Exchange sync (runs every check cycle) ─────────────────────────────────
+    # ââ Exchange sync (runs every check cycle) âââââââââââââââââââââââââââââââââ
 
     async def sync_from_exchange(self) -> None:
         try:
@@ -262,13 +262,13 @@ class PositionManager:
 
         self._save()
 
-    # ── TP/SL monitoring ───────────────────────────────────────────────────────
+    # ââ TP/SL monitoring âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     async def check_positions(self) -> None:
         await self.sync_from_exchange()
 
         if not self._entries:
-            logger.debug("No tracked positions — skipping TP/SL check")
+            logger.debug("No tracked positions â skipping TP/SL check")
             return
 
         logger.info("TP/SL check: %d tracked position(s)", len(self._entries))
@@ -279,15 +279,9 @@ class PositionManager:
             (p.get("marketSlug") or p.get("slug") or p.get("market_slug") or ""): p
             for p in positions
         }
-        if positions:
-            sample = positions[0]
-            logger.info("Portfolio position keys: %s | avgPrice=%s avg_price=%s currentPrice=%s price=%s",
-                        list(sample.keys()), sample.get("avgPrice"), sample.get("avg_price"),
-                        sample.get("currentPrice"), sample.get("price"))
-
         for token_id, entry in list(self._entries.items()):
             if exchange_has_data and entry.market_slug not in live_by_slug:
-                logger.info("Position %s confirmed closed on exchange — removing", entry.market_slug)
+                logger.info("Position %s confirmed closed on exchange â removing", entry.market_slug)
                 self._entries.pop(token_id, None)
                 self._save()
                 continue
@@ -295,36 +289,21 @@ class PositionManager:
             # CLOB last-trade price for this specific token (YES or NO)
             current_price = await self._client.get_current_price(token_id)
 
-            if current_price is None:
-                # Fallback to portfolio YES price; convert to token space.
-                pos_data = live_by_slug.get(entry.market_slug, {})
-                yes_price = float(pos_data.get("currentPrice") or pos_data.get("avgPrice") or pos_data.get("avg_price") or pos_data.get("price") or 0)
-                if yes_price > 0 and abs(yes_price - 0.500) > 0.02:
-                    current_price = (1.0 - yes_price) if entry.side == "NO" else yes_price
+            if current_price is None or abs(current_price - 0.500) < 0.001:
+                # CLOB gave no usable price â fetch live price via Gamma API by slug.
+                live_yes = await self._client.get_price_by_slug(entry.market_slug)
+                if live_yes and abs(live_yes - 0.500) > 0.02:
+                    current_price = (1.0 - live_yes) if entry.side == "NO" else live_yes
                     logger.info(
-                        "Portfolio fallback %s: side=%s yes=%.3f → token_price=%.3f entry=%.3f",
-                        entry.market_slug, entry.side, yes_price, current_price, entry.price,
+                        "Gamma price %s: side=%s yes=%.3f â token_price=%.3f entry=%.3f",
+                        entry.market_slug, entry.side, live_yes, current_price, entry.price,
                     )
                 else:
-                    logger.info("No reliable price for %s (token=%s…) — skipping cycle",
-                                entry.market_slug, str(token_id)[:16])
+                    logger.info("No live price for %s (clob=%s gamma=%s) â skipping cycle",
+                                entry.market_slug, current_price, live_yes)
                     continue
 
-            # 0.500 is the CLOB sentinel for thin books with no real trades.
-            if abs(current_price - 0.500) < 0.001:
-                pos_data = live_by_slug.get(entry.market_slug, {})
-                yes_price = float(pos_data.get("currentPrice") or pos_data.get("avgPrice") or pos_data.get("avg_price") or pos_data.get("price") or 0)
-                if yes_price > 0 and abs(yes_price - 0.500) > 0.02:
-                    current_price = (1.0 - yes_price) if entry.side == "NO" else yes_price
-                    logger.info(
-                        "0.500 sentinel fallback %s: side=%s yes=%.3f → token_price=%.3f entry=%.3f",
-                        entry.market_slug, entry.side, yes_price, current_price, entry.price,
-                    )
-                else:
-                    logger.info("Price is 0.500 sentinel for %s — skipping TP/SL", entry.market_slug)
-                    continue
-
-            # P&L in token-price space — entry.price and current_price are both token prices.
+            # P&L in token-price space â entry.price and current_price are both token prices.
             pnl = (current_price - entry.price) / entry.price
             logger.info(
                 "TP/SL check %s: side=%s token_price=%.3f entry=%.3f pnl=%+.1f%% TP=%.0f%% SL=%.0f%%",
@@ -352,7 +331,7 @@ class PositionManager:
         executions = (resp or {}).get("executions") or [] if isinstance(resp, dict) else []
         if not executions:
             logger.warning(
-                "Close order for %s had no executions — order resting on exchange",
+                "Close order for %s had no executions â order resting on exchange",
                 entry.market_slug,
             )
 
@@ -364,18 +343,18 @@ class PositionManager:
             contribution = round(profit_usd * _RESERVE_PCT, 4)
             self._reserve_usd += contribution
             self._save_reserve()
-            logger.info("Reserve +$%.4f (10%% of $%.4f profit) → total $%.2f",
+            logger.info("Reserve +$%.4f (10%% of $%.4f profit) â total $%.2f",
                         contribution, profit_usd, self._reserve_usd)
 
         slug_safe       = html.escape(entry.market_slug)
         conviction_safe = html.escape(str(entry.conviction))
         triggers_safe   = html.escape(str(entry.triggers))
         msg = (
-            f"🔔 <b>Position Closed</b> ({reason})\n"
+            f"ð <b>Position Closed</b> ({reason})\n"
             f"Market: <code>{slug_safe}</code>\n"
-            f"Entry: {entry.price:.3f} → Current: {current_price:.3f}\n"
+            f"Entry: {entry.price:.3f} â Current: {current_price:.3f}\n"
             f"Conviction: {conviction_safe} | {triggers_safe}\n"
-            f"Result: {'✅' if 'TP' in reason else '🔴'} {reason}"
+            f"Result: {'â' if 'TP' in reason else 'ð´'} {reason}"
         )
         try:
             await self._app.bot.send_message(
@@ -385,7 +364,7 @@ class PositionManager:
             logger.error("Failed to send close notification: %s", exc)
         logger.info("Closed position %s: %s", entry.market_slug, reason)
 
-    # ── Partial close (sell half on strong TP) ─────────────────────────────────
+    # ââ Partial close (sell half on strong TP) âââââââââââââââââââââââââââââââââ
 
     async def sell_half(self, token_id: str, entry: _Entry, current_price: float) -> None:
         half_usd = entry.amount_usd / 2
@@ -407,11 +386,11 @@ class PositionManager:
         )
         self._save()
 
-    # ── Daily P&L report ───────────────────────────────────────────────────────
+    # ââ Daily P&L report âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     async def get_report(self) -> str:
         positions = await self._client.get_open_positions()
-        lines = [f"📊 Daily Report — {len(self._entries)} tracked position(s)\n"]
+        lines = [f"ð Daily Report â {len(self._entries)} tracked position(s)\n"]
 
         live_by_slug = {
             (p.get("marketSlug") or p.get("slug") or ""): p
@@ -430,10 +409,10 @@ class PositionManager:
             else:
                 current_token = entry.price
             pnl = (current_token - entry.price) / entry.price
-            emoji = "🟢" if pnl >= 0 else "🔴"
+            emoji = "ð¢" if pnl >= 0 else "ð´"
             lines.append(
                 f"{emoji} {entry.market_slug[:24]}  {entry.side} "
-                f"@ {entry.price:.3f} → {current_token:.3f} ({pnl:+.1%}) "
+                f"@ {entry.price:.3f} â {current_token:.3f} ({pnl:+.1%}) "
                 f"[{entry.conviction}]"
             )
 
