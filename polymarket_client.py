@@ -332,6 +332,12 @@ class PolymarketClient:
     async def get_current_price(self, token_id):
         if not token_id or len(str(token_id)) < 32:
             return None
+        # Reject slugs (contain letters+dashes) — only real hex/numeric token IDs are valid
+        tok = str(token_id)
+        if not tok.replace("-", "").isdigit() and not (len(tok) >= 60 and tok.replace("0x", "").replace("-", "").isalnum()):
+            # Accept only long hex-like IDs (real CLOB token IDs are 64+ char hex)
+            if len(tok) < 60 or "-" in tok:
+                return None
         data = await self._get(f"{CLOB_API}/last-trade-price", params={"token_id": token_id})
         if data:
             try:
@@ -340,6 +346,47 @@ class PolymarketClient:
                     return p
             except Exception:
                 pass
+        return None
+
+    async def get_price_by_slug(self, market_slug: str) -> float | None:
+        """Fetch live YES-side price by market slug — works for in-play markets."""
+        # Use cached token ID if we already resolved it
+        cached = self._slug_map.get(market_slug)
+        if cached and len(cached) >= 60:
+            price = await self.get_current_price(cached)
+            if price:
+                return price
+
+        data = await self._get(
+            f"{GAMMA_API}/markets",
+            params={"slug": market_slug, "limit": 1},
+        )
+        markets = data if isinstance(data, list) else (data or {}).get("data", []) if data else []
+        if not markets:
+            return None
+        m = markets[0]
+
+        # Cache real CLOB token ID for future calls
+        token_id = self.resolve_token_id(m, "YES")
+        if token_id and len(str(token_id)) >= 60:
+            self._slug_map[market_slug] = str(token_id)
+            price = await self.get_current_price(token_id)
+            if price:
+                logger.info("get_price_by_slug %s: CLOB YES=%.3f", market_slug, price)
+                return price
+
+        # Fall back to outcomePrices embedded in market data
+        op = m.get("outcomePrices")
+        if op:
+            try:
+                prices = json.loads(op) if isinstance(op, str) else op
+                p = float(prices[0])
+                if 0.01 < p < 0.99:
+                    logger.info("get_price_by_slug %s: outcomePrices YES=%.3f", market_slug, p)
+                    return p
+            except Exception:
+                pass
+
         return None
 
     # ---------------------------------------------------------------- #
