@@ -222,55 +222,19 @@ class PolymarketClient:
         try:
             all_markets: list[dict] = []
 
-            for head_off in range(0, 2000, 200):
-                head_events = await _fetch_page(head_off)
-                if not head_events:
-                    break
-                head_markets = _build_markets(head_events)
-                all_markets.extend(head_markets)
-                logger.info("Head scan offset=%d: +%d markets", head_off, len(head_markets))
-
-            start_offset = max(2000, self._upcoming_offset - 200)
-            if start_offset > 2000:
-                logger.info("Jumping to cached offset %d to find upcoming games", start_offset)
-
-            found = False
-            offset = start_offset
-            max_offset = start_offset + 30000
-
-            while offset <= max_offset:
+            for offset in range(0, 32_000, 200):
                 page_events = await _fetch_page(offset)
                 if not page_events:
-                    logger.info("Pagination stopped at offset %d — no more events", offset)
+                    logger.info("Scan stopped at offset %d — %d markets collected", offset, len(all_markets))
                     break
                 page_markets = _build_markets(page_events)
                 all_markets.extend(page_markets)
-                if offset == start_offset and page_events:
-                    logger.info("SDK page offset=%d: %d events, sample keys: %s",
-                                offset, len(page_events), list(page_events[0].keys()))
+                if offset == 0:
+                    logger.info("SDK page offset=0: %d events, sample keys: %s",
+                                len(page_events), list(page_events[0].keys()))
                 else:
-                    logger.info("Paginated offset=%d: +%d markets (%d total)",
+                    logger.info("Scan offset=%d: +%d markets (%d total)",
                                 offset, len(page_markets), len(all_markets))
-                if _upcoming_in(page_markets):
-                    logger.info("Found upcoming games at offset %d — caching", offset)
-                    self._upcoming_offset = offset
-                    self._save_offset_cache(offset)
-                    found = True
-                    for extra_off in range(offset + 200, offset + 4800, 200):
-                        extra_events = await _fetch_page(extra_off)
-                        if not extra_events:
-                            break
-                        all_markets.extend(_build_markets(extra_events))
-                    break
-                offset += 200
-
-            if not found:
-                if start_offset > 0:
-                    logger.warning("No upcoming games at cached offset %d — resetting cache", start_offset)
-                    self._upcoming_offset = 0
-                    self._save_offset_cache(0)
-                else:
-                    logger.warning("Pagination exhausted to offset %d — no upcoming games found", offset)
 
             game_times = sorted(set(
                 m.get("gameStartTime", "")[:10]

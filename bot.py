@@ -131,6 +131,7 @@ async def scan_markets(
     logger.info("Scanning markets…")
     import analyzer as _analyzer
     _analyzer._skip_log_count = 0  # reset per scan so skip reasons stay visible in logs
+    _analyzer.reset_skip_counts()
     balance = await client.get_balance()
     reserve = position_mgr.get_reserve()
     tradeable = balance - reserve
@@ -245,6 +246,8 @@ async def scan_markets(
             )
             await _send(app, msg)
 
+    logger.info("Scan complete: %d signal(s) | skip summary: %s",
+                signals_fired, _analyzer.get_skip_summary())
     if signals_fired == 0:
         logger.info("No signals this scan")
 

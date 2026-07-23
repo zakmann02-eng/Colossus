@@ -41,10 +41,25 @@ logger = logging.getLogger(__name__)
 MIN_PRICE    = 0.05
 MAX_PRICE    = 0.95
 MIN_VOL_24H  = 5.0
-MAX_DAYS_OUT = 7 * 86_400
+MAX_DAYS_OUT = 14 * 86_400
 MIN_TRIGGERS = 2  # any 2 of T1/T2/T3/T5; T5 counts double when present
 
 _skip_log_count = 0  # log first N skips at INFO so Railway shows why
+
+# Per-scan skip counters — reset by bot.py before each scan
+_skip_counts: dict[str, int] = {}
+
+def reset_skip_counts() -> None:
+    global _skip_counts
+    _skip_counts = {}
+
+def _skip(reason: str) -> None:
+    _skip_counts[reason] = _skip_counts.get(reason, 0) + 1
+
+def get_skip_summary() -> str:
+    if not _skip_counts:
+        return "no skips"
+    return " | ".join(f"{k}={v}" for k, v in sorted(_skip_counts.items(), key=lambda x: -x[1]))
 
 T1_LOW  = 0.45
 T1_HIGH = 0.55
@@ -101,11 +116,13 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
 
     token_id = client.resolve_token_id(market, "YES")
     if not token_id:
+        _skip("no-token")
         logger.debug("SKIP no-token: %s", question[:60])
         return None
 
     secs = client.seconds_to_resolution(market)
     if secs is None:
+        _skip("no-date")
         if _skip_log_count < 10:
             _skip_log_count += 1
             logger.info("SKIP no-date [diag]: slug=%s q=%s", market_slug[:30], question[:50])
@@ -115,14 +132,17 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
 
     # Past games and far-future markets go to debug — they're expected and burn INFO quota
     if secs <= 0:
+        _skip("past")
         logger.debug("SKIP past(%.1fd): %s", secs / 86400, question[:60])
         return None
     if secs > MAX_DAYS_OUT:
+        _skip("far-future")
         logger.debug("SKIP far-future(%.1fd): %s", secs / 86400, question[:60])
         return None
 
     vol_24h = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
     if vol_24h < MIN_VOL_24H:
+        _skip("low-vol")
         if _skip_log_count < 10:
             _skip_log_count += 1
             logger.info("SKIP vol(%.0f < %.0f) [diag]: slug=%s q=%s",
@@ -133,6 +153,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
 
     price = await client.get_market_price(market, token_id)
     if not price:
+        _skip("no-price")
         if _skip_log_count < 10:
             _skip_log_count += 1
             logger.info("SKIP no-price [diag]: slug=%s token=%s q=%s",
@@ -142,6 +163,7 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         return None
 
     if price < MIN_PRICE or price > MAX_PRICE:
+        _skip("price-extreme")
         logger.debug("SKIP price(%.3f): %s", price, question[:60])
         return None
 
