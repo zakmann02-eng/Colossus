@@ -65,33 +65,57 @@ _SPORT_KEYS: dict[str, str] = {
 }
 
 # ── Keywords → sport key lookup ────────────────────────────────────────────────
+# ORDER MATTERS — first match wins; put specific competitions before generic buckets.
 _SPORT_KEYWORDS: dict[str, list[str]] = {
+    # ── FIFA World Cup 2026 (USA/Canada/Mexico) ──────────────────────────────
     "worldcup":   ["world cup", "fifa world cup", "copa mundial", "worldcup",
                    "world cup 2026", "2026 world cup", "fifa wc", "wc 2026",
-                   "fwc", "atc-fwc"],
+                   "fwc", "atc-fwc", "world cup group", "wc group",
+                   "concacaf gold cup"],
+    # ── Combat sports ────────────────────────────────────────────────────────
     "ufc":        ["ufc", "ultimate fighting championship"],
-    "mma":        ["mma", "bellator", "one championship", "pfl"],
+    "mma":        ["mma", "bellator", "one championship", "pfl", "rizin"],
     "boxing":     ["boxing", "wbc", "wba", "ibf", "wbo", "heavyweight fight",
-                   "lightweight fight", "welterweight"],
+                   "lightweight fight", "welterweight", "featherweight",
+                   "middleweight", "cruiserweight", "title fight"],
+    # ── Tennis ───────────────────────────────────────────────────────────────
     "tennis_atp": ["atp", "itf mens", "itf men", "wimbledon men",
                    "french open men", "us open men", "australian open men"],
     "tennis_wta": ["wta", "itf womens", "itf women", "wimbledon women",
                    "french open women", "us open women", "australian open women",
                    "grass court championships"],
-    "tennis":     ["tennis", "wimbledon", "roland garros"],
+    "tennis":     ["tennis", "wimbledon", "roland garros", "us open tennis",
+                   "australian open tennis"],
+    # ── Soccer — specific competitions first, generic bucket last ─────────────
+    "champions":  ["champions league", "ucl", "uefa champions"],
+    "europa":     ["europa league", "uel", "uefa europa", "conference league",
+                   "uecl"],
+    "copa_america": ["copa america", "conmebol copa america", "copa america 2026",
+                     "copa america usa"],
+    "copa":         ["copa libertadores", "copa sudamericana"],
     "soccer":     ["premier league", "epl", "la liga", "serie a", "bundesliga",
                    "ligue 1", "mls", "soccer", "football match",
-                   "champions league", "europa league"],
-    "champions":  ["champions league", "ucl"],
-    "europa":     ["europa league", "uel"],
-    "basketball": ["nba", "wnba", "basketball"],
-    "baseball":   ["mlb", "baseball"],
-    "hockey":     ["nhl", "hockey", "ice hockey"],
-    "football":   ["nfl", "ncaaf", "super bowl", "american football"],
-    "golf":       ["pga", "golf", "masters", "open championship"],
-    "f1":         ["formula 1", "formula one", "f1", "grand prix"],
-    "copa_america": ["copa america", "conmebol copa america", "copa america 2026"],
-    "copa":         ["copa libertadores", "copa sudamericana"],
+                   "eredivisie", "liga nos", "primeira liga", "scottish premiership",
+                   "super lig", "pro league", "brasileirao", "serie b",
+                   "concacaf champions", "caf champions", "afc champions"],
+    # ── North American leagues ────────────────────────────────────────────────
+    "basketball": ["nba", "wnba", "basketball", "nba finals", "nba playoffs",
+                   "nba draft", "euroleague basketball"],
+    "baseball":   ["mlb", "baseball", "world series", "mlb playoffs",
+                   "alcs", "nlcs", "alds", "nlds"],
+    "hockey":     ["nhl", "hockey", "ice hockey", "stanley cup"],
+    "football":   ["nfl", "ncaaf", "super bowl", "american football",
+                   "nfl draft", "college football", "nfl playoffs",
+                   "nfc championship", "afc championship"],
+    # ── Other sports ──────────────────────────────────────────────────────────
+    "golf":       ["pga", "golf", "masters", "open championship", "us open golf",
+                   "ryder cup", "the open", "pga championship"],
+    "f1":         ["formula 1", "formula one", "f1", "grand prix",
+                   "formula e", "indycar"],
+    "rugby":      ["rugby", "six nations", "rugby world cup", "nrl", "super rugby",
+                   "premiership rugby"],
+    "aussierules": ["afl", "aussie rules", "australian football league"],
+    "cricket":    ["cricket", "test match", "ipl", "odi", "t20"],
 }
 
 
