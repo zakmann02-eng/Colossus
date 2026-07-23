@@ -349,7 +349,7 @@ class PolymarketClient:
         return None
 
     async def get_price_by_slug(self, market_slug: str) -> float | None:
-        """Fetch live YES-side price by market slug — works for in-play markets."""
+        """Fetch live YES-side price by market slug — tries US SDK, gateway, then Gamma."""
         # Use cached token ID if we already resolved it
         cached = self._slug_map.get(market_slug)
         if cached and len(cached) >= 60:
@@ -357,35 +357,73 @@ class PolymarketClient:
             if price:
                 return price
 
-        data = await self._get(
-            f"{GAMMA_API}/markets",
-            params={"slug": market_slug, "limit": 1},
-        )
-        markets = data if isinstance(data, list) else (data or {}).get("data", []) if data else []
-        if not markets:
-            return None
-        m = markets[0]
-
-        # Cache real CLOB token ID for future calls
-        token_id = self.resolve_token_id(m, "YES")
-        if token_id and len(str(token_id)) >= 60:
-            self._slug_map[market_slug] = str(token_id)
-            price = await self.get_current_price(token_id)
-            if price:
-                logger.info("get_price_by_slug %s: CLOB YES=%.3f", market_slug, price)
-                return price
-
-        # Fall back to outcomePrices embedded in market data
-        op = m.get("outcomePrices")
-        if op:
+        # Try US SDK first — same authenticated source as market scanning
+        if self._us_client:
             try:
-                prices = json.loads(op) if isinstance(op, str) else op
-                p = float(prices[0])
-                if 0.01 < p < 0.99:
-                    logger.info("get_price_by_slug %s: outcomePrices YES=%.3f", market_slug, p)
-                    return p
-            except Exception:
-                pass
+                loop = asyncio.get_event_loop()
+                data = await loop.run_in_executor(
+                    None,
+                    lambda: self._us_client.events.list({"slug": market_slug, "limit": 5})
+                )
+                events = (
+                    data if isinstance(data, list)
+                    else (data or {}).get("data") or (data or {}).get("events") or []
+                ) if data else []
+                for event in events:
+                    event_slug = event.get("slug") or event.get("eventSlug") or ""
+                    sub = event.get("markets") or []
+                    for m in ([event] + sub):
+                        m_slug = m.get("slug") or ""
+                        if m_slug != market_slug and event_slug != market_slug:
+                            continue
+                        token_id = self.resolve_token_id(m, "YES")
+                        if token_id and len(str(token_id)) >= 60:
+                            self._slug_map[market_slug] = str(token_id)
+                            clob = await self.get_current_price(token_id)
+                            if clob:
+                                logger.info("get_price_by_slug %s [US SDK CLOB]: %.3f", market_slug, clob)
+                                return clob
+                        price = await self.get_market_price(m, token_id)
+                        if price and abs(price - 0.5) > 0.01:
+                            logger.info("get_price_by_slug %s [US SDK]: YES=%.3f", market_slug, price)
+                            return price
+            except Exception as exc:
+                logger.debug("get_price_by_slug US SDK failed for %s: %s", market_slug, exc)
+
+        # HTTP fallback: US gateway events, US gateway markets, Gamma
+        candidates = [
+            ("https://gateway.polymarket.us/v1/events", {"slug": market_slug, "limit": 1}),
+            ("https://gateway.polymarket.us/v1/markets", {"slug": market_slug, "limit": 1}),
+            (f"{GAMMA_API}/markets", {"slug": market_slug, "limit": 1}),
+        ]
+        for url, params in candidates:
+            data = await self._get(url, params=params)
+            if not data:
+                continue
+            items = (
+                data if isinstance(data, list)
+                else data.get("data") or data.get("events") or data.get("markets") or []
+            )
+            if not items:
+                continue
+            item = items[0]
+            # Events embed sub-markets; check both the event itself and its markets array
+            sub = item.get("markets") or []
+            for m in ([item] + sub):
+                slug_match = m.get("slug") == market_slug or not sub
+                if not slug_match:
+                    continue
+                token_id = self.resolve_token_id(m, "YES")
+                if token_id and len(str(token_id)) >= 60:
+                    self._slug_map[market_slug] = str(token_id)
+                    clob = await self.get_current_price(token_id)
+                    if clob:
+                        logger.info("get_price_by_slug %s [%s]: CLOB YES=%.3f", market_slug, url, clob)
+                        return clob
+                price = await self.get_market_price(m, token_id)
+                if price and abs(price - 0.5) > 0.02:
+                    logger.info("get_price_by_slug %s [%s]: market_price YES=%.3f", market_slug, url, price)
+                    return price
 
         return None
 

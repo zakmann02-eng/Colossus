@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 MIN_PRICE    = 0.05
 MAX_PRICE    = 0.95
-MIN_VOL_24H  = 75.0
+MIN_VOL_24H  = 5.0
 MAX_DAYS_OUT = 7 * 86_400
 MIN_TRIGGERS = 2  # any 2 of T1/T2/T3/T5; T5 counts double when present
 
