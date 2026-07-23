@@ -166,8 +166,9 @@ class PolymarketClient:
                         row["question"]       = m.get("question") or m.get("title") or event.get("title") or ""
                         row["volume24hr"]     = event.get("volume24hr") or m.get("volume24hr") or 0
                         row["resolutionTime"] = (
-                            m.get("resolutionTime") or m.get("closeTime") or
-                            event.get("resolutionTime") or event.get("closeTime") or ""
+                            m.get("resolutionTime") or m.get("closeTime") or m.get("closedTime") or
+                            event.get("resolutionTime") or event.get("closeTime") or event.get("closedTime") or
+                            event.get("endDate") or m.get("endDate") or ""
                         )
                         row["eventState"]     = event.get("eventState") or ""
                         markets.append(row)
@@ -665,7 +666,10 @@ class PolymarketClient:
             return str(raw)[:10] or "N/A"
 
     def seconds_to_resolution(self, market):
-        raw = market.get("resolutionTime") or market.get("closeTime")
+        raw = (
+            market.get("resolutionTime") or market.get("closeTime") or market.get("closedTime") or
+            market.get("endDate")
+        )
         if not raw:
             for gst_key in ("gameStartTime", "startTime"):
                 game_raw = market.get(gst_key)
@@ -679,7 +683,7 @@ class PolymarketClient:
                     return (game_ts + 4 * 3600) - time.time()
                 except Exception:
                     pass
-            raw = market.get("endDate") or market.get("startDate")
+            raw = market.get("startDate")
             if not raw:
                 return None
         try:
