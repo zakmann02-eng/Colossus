@@ -52,6 +52,32 @@ _BLOCKED = {
     "exact score", "correct score", "scoreline",
 }
 
+# At least one of these must appear in question/title/category/tags for a market to be tradeable.
+# Blocks geopolitical, tech, entertainment, and other non-sports markets.
+_SPORT_REQUIRED = {
+    # Generic game/match signals
+    "vs", "v.", " vs.", "match", "game", "fight", "bout",
+    "tournament", "championship", "league", "cup", "series", "playoff",
+    "win", "winner", "beat", "defeat", "advance",
+    # Sports by name
+    "soccer", "football", "nfl", "nba", "nhl", "mlb",
+    "ufc", "mma", "boxing", "wrestling",
+    "tennis", "golf", "f1", "formula 1", "indycar",
+    "rugby", "cricket", "hockey", "baseball", "basketball",
+    "afl", "aussie rules",
+    # Competitions / events
+    "world cup", "champions league", "europa league", "premier league",
+    "la liga", "serie a", "bundesliga", "ligue 1", "mls",
+    "copa", "grand slam", "wimbledon", "us open", "french open", "australian open",
+    "super bowl", "world series", "stanley cup", "nba finals",
+    "grand prix", "masters", "open championship",
+    "gold cup", "nations league",
+    # Score / stat outcomes
+    "score", "goal", "point", "run", "inning", "set",
+    "knockout", "ko", "tko", "submission", "decision",
+    "medal", "podium",
+}
+
 
 class PolymarketClient:
     def __init__(self, session, key_id: str, secret_key: str) -> None:
@@ -111,24 +137,14 @@ class PolymarketClient:
             return None
 
     # ---------------------------------------------------------------- #
-    # Market scanning — SDK first, Gamma fallback                       #
+    # Market scanning — Polymarket.US SDK only (no Gamma/COM fallback) #
     # ---------------------------------------------------------------- #
 
     async def get_sports_markets(self, limit=200):
         us_markets = await self._get_us_sdk_markets(limit)
-        if us_markets:
-            allowed = [m for m in us_markets if self._is_allowed(m)]
-            logger.info("Polymarket.US SDK: %d markets, %d allowed", len(us_markets), len(allowed))
-            return allowed
-
-        # Fallback to Gamma API
-        data = await self._get(
-            f"{GAMMA_API}/markets",
-            params={"active": "true", "closed": "false", "limit": limit,
-                    "order": "volume24hr", "ascending": "false"},
-        )
-        markets = data if isinstance(data, list) else (data or {}).get("data", []) if data else []
-        return [m for m in markets if self._is_allowed(m)]
+        allowed = [m for m in us_markets if self._is_allowed(m)]
+        logger.info("Polymarket.US SDK: %d markets, %d allowed", len(us_markets), len(allowed))
+        return allowed
 
     async def _get_us_sdk_markets(self, limit=200) -> list[dict]:
         if not self._us_client:
@@ -189,15 +205,19 @@ class PolymarketClient:
 
         async def _fetch_page(off: int) -> list:
             o = off
-            data = await loop.run_in_executor(
-                None,
-                lambda: self._us_client.events.list({
-                    "limit": 200,
-                    "active": True,
-                    "offset": o,
-                }),
-            )
-            return _extract_events(data)
+            try:
+                data = await loop.run_in_executor(
+                    None,
+                    lambda: self._us_client.events.list({
+                        "limit": 200,
+                        "active": True,
+                        "offset": o,
+                    }),
+                )
+                return _extract_events(data)
+            except Exception as exc:
+                logger.debug("_fetch_page offset=%d failed: %.120s", o, str(exc))
+                return []
 
         try:
             all_markets: list[dict] = []
@@ -260,7 +280,7 @@ class PolymarketClient:
                         len(all_markets), game_times[-10:])
             return all_markets
         except Exception as exc:
-            logger.warning("US SDK events.list failed: %s — falling back to Gamma API", exc)
+            logger.warning("US SDK events.list failed: %s", exc)
             return []
 
     def _is_allowed(self, market):
@@ -303,6 +323,17 @@ class PolymarketClient:
             if kw in text:
                 logger.debug("BLOCKED keyword '%s': %s", kw, text[:80])
                 return False
+
+        # Require at least one sport signal — blocks geopolitical/tech/entertainment markets
+        has_game_data = bool(
+            market.get("gameStartTime") or
+            market.get("teams") or
+            market.get("sportradarGameId") or
+            market.get("sportradarEventId")
+        )
+        if not has_game_data and not any(kw in text for kw in _SPORT_REQUIRED):
+            logger.debug("BLOCKED non-sport: %s", text[:80])
+            return False
         return True
 
     # ---------------------------------------------------------------- #
