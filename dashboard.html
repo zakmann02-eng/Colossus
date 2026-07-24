@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Colossus Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d1117; color: #e6edf3; font-family: 'Courier New', monospace; padding: 20px; }
+    header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 20px; }
+    header h1 { color: #58a6ff; font-size: 22px; }
+    #updated { color: #8b949e; font-size: 12px; }
+    .grid { display: grid; grid-template-columns: 200px 1fr; gap: 16px; margin-bottom: 16px; }
+    .full { grid-column: 1 / -1; }
+    .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+    .panel h2 { color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }
+    .reserve-val { font-size: 32px; color: #3fb950; font-weight: bold; }
+    .stat { margin-bottom: 10px; }
+    .stat-label { color: #8b949e; font-size: 11px; margin-bottom: 2px; }
+    .stat-val { font-size: 16px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th { color: #8b949e; text-align: left; padding: 6px 8px; font-weight: normal; font-size: 11px; }
+    td { padding: 6px 8px; border-top: 1px solid #21262d; }
+    tr:hover td { background: #1c2128; }
+    .pos { color: #3fb950; }
+    .neg { color: #f85149; }
+    .neu { color: #8b949e; }
+    .tag { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 11px; }
+    .tag-signal { background: #1f6feb44; color: #58a6ff; border: 1px solid #1f6feb66; }
+    .tag-skip   { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+    .tag-pos    { background: #1a4a1a; color: #3fb950; border: 1px solid #2ea04344; }
+    .tag-neg    { background: #4a1a1a; color: #f85149; border: 1px solid #f8514944; }
+    .tag-order  { background: #2d2a1a; color: #e3b341; border: 1px solid #e3b34144; }
+    .feed { max-height: 380px; overflow-y: auto; }
+    .feed-row { display: flex; align-items: baseline; gap: 8px; padding: 5px 8px; border-bottom: 1px solid #21262d; font-size: 12px; }
+    .feed-row:hover { background: #1c2128; }
+    .feed-time { color: #8b949e; font-size: 11px; min-width: 60px; }
+    .feed-slug { color: #58a6ff; min-width: 180px; }
+    .feed-detail { color: #8b949e; flex: 1; }
+    .feed-triggers { color: #e3b341; font-size: 11px; }
+    .empty { color: #8b949e; padding: 12px 8px; font-size: 12px; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0d1117; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>⚡ Colossus</h1>
+    <span id="updated">connecting...</span>
+  </header>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Reserve</h2>
+      <div class="reserve-val" id="reserve-val">$0.0000</div>
+      <div style="color:#8b949e;font-size:11px;margin-top:6px">10% of winning profits</div>
+    </div>
+    <div class="panel">
+      <h2>Session Stats</h2>
+      <div style="display:flex;gap:32px">
+        <div class="stat"><div class="stat-label">Active Positions</div><div class="stat-val" id="stat-pos">—</div></div>
+        <div class="stat"><div class="stat-label">Closed Trades</div><div class="stat-val" id="stat-closed">—</div></div>
+        <div class="stat"><div class="stat-label">Scan Events</div><div class="stat-val" id="stat-feed">—</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel full" style="margin-bottom:16px">
+    <h2>Active Positions</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Market</th><th>Side</th><th>Entry</th><th>Size</th>
+          <th>TP Target</th><th>SL Target</th><th>Conviction</th><th>Triggers</th>
+        </tr>
+      </thead>
+      <tbody id="pos-body"></tbody>
+    </table>
+  </div>
+
+  <div class="panel full" style="margin-bottom:16px">
+    <h2>Scan Feed — live market analysis</h2>
+    <div class="feed" id="feed"></div>
+  </div>
+
+  <div class="panel full">
+    <h2>Trade History (last 50)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Time (UTC)</th><th>Market</th><th>Side</th>
+          <th>Entry</th><th>Exit</th><th>PnL</th><th>Reason</th><th>Conviction</th>
+        </tr>
+      </thead>
+      <tbody id="trades-body"></tbody>
+    </table>
+  </div>
+
+  <script>
+    async function get(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    }
+
+    function pnlClass(pnlStr) {
+      const v = parseFloat(pnlStr);
+      return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu';
+    }
+
+    function reasonTag(reason) {
+      if (!reason) return '';
+      if (reason.startsWith('TP')) return `<span class="tag tag-pos">${reason}</span>`;
+      if (reason.startsWith('SL')) return `<span class="tag tag-neg">${reason}</span>`;
+      if (reason.startsWith('MANUAL')) return `<span class="tag tag-order">${reason}</span>`;
+      return `<span class="tag tag-skip">${reason}</span>`;
+    }
+
+    async function refresh() {
+      try {
+        const [positions, reserve, trades, feed] = await Promise.all([
+          get('/api/positions'),
+          get('/api/reserve'),
+          get('/api/trades'),
+          get('/api/scan-feed'),
+        ]);
+
+        document.getElementById('reserve-val').textContent =
+          '$' + (+(reserve.reserve_usd || 0)).toFixed(4);
+
+        document.getElementById('stat-pos').textContent = Object.keys(positions).length;
+        document.getElementById('stat-closed').textContent = trades.length;
+        document.getElementById('stat-feed').textContent = feed.length;
+
+        const posBody = document.getElementById('pos-body');
+        const posEntries = Object.entries(positions);
+        if (posEntries.length === 0) {
+          posBody.innerHTML = '<tr><td colspan="8" class="empty">No active positions</td></tr>';
+        } else {
+          posBody.innerHTML = posEntries.map(([, e]) => `
+            <tr>
+              <td style="color:#58a6ff">${e.market_slug}</td>
+              <td>${e.side}</td>
+              <td>${(+e.price).toFixed(3)}</td>
+              <td>$${(+e.amount_usd).toFixed(2)}</td>
+              <td class="pos">+${(+(e.tp||0)*100).toFixed(0)}%</td>
+              <td class="neg">-${(+(e.sl||0)*100).toFixed(0)}%</td>
+              <td>${e.conviction || '—'}</td>
+              <td style="color:#8b949e;font-size:11px">${e.triggers || '—'}</td>
+            </tr>`).join('');
+        }
+
+        const feedEl = document.getElementById('feed');
+        if (feed.length === 0) {
+          feedEl.innerHTML = '<div class="empty">No scan events yet — waiting for next scan cycle</div>';
+        } else {
+          feedEl.innerHTML = feed.map(ev => {
+            const tagCls = ev.result === 'SIGNAL' ? 'tag-signal' : ev.result === 'ORDER' ? 'tag-order' : 'tag-skip';
+            const triggers = ev.triggers && ev.triggers.length
+              ? `<span class="feed-triggers">[${ev.triggers.join(', ')}]</span>` : '';
+            const price = ev.price != null ? ` @ <b>${(+ev.price).toFixed(3)}</b>` : '';
+            return `<div class="feed-row">
+              <span class="feed-time">${ev.time}</span>
+              <span class="tag ${tagCls}">${ev.result}</span>
+              <span class="feed-slug">${ev.slug}</span>
+              <span class="feed-detail">${ev.reason}${price}</span>
+              ${triggers}
+            </div>`;
+          }).join('');
+        }
+
+        const tradesBody = document.getElementById('trades-body');
+        if (trades.length === 0) {
+          tradesBody.innerHTML = '<tr><td colspan="8" class="empty">No closed trades yet</td></tr>';
+        } else {
+          tradesBody.innerHTML = trades.map(t => `
+            <tr>
+              <td class="neu">${(t.timestamp||'').substring(11,19)}</td>
+              <td style="color:#58a6ff">${t.market_slug||''}</td>
+              <td>${t.side||''}</td>
+              <td>${t.entry_price||''}</td>
+              <td>${t.exit_price||''}</td>
+              <td class="${pnlClass(t.pnl_pct)}">${t.pnl_pct||''}</td>
+              <td>${reasonTag(t.reason)}</td>
+              <td class="neu">${t.conviction||''}</td>
+            </tr>`).join('');
+        }
+
+        document.getElementById('updated').textContent =
+          'updated ' + new Date().toLocaleTimeString();
+      } catch (e) {
+        document.getElementById('updated').textContent = 'error — retrying...';
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
