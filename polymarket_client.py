@@ -55,27 +55,24 @@ _BLOCKED = {
 # At least one of these must appear in question/title/category/tags for a market to be tradeable.
 # Blocks geopolitical, tech, entertainment, and other non-sports markets.
 _SPORT_REQUIRED = {
-    # Generic game/match signals
-    "vs", "v.", " vs.", "match", "game", "fight", "bout",
-    "tournament", "championship", "league", "cup", "series", "playoff",
-    "win", "winner", "beat", "defeat", "advance",
+    # Strong match/contest signals
+    "vs", "v.", " vs.", "match", "fight", "bout",
+    "tournament", "championship", "playoff", "series",
     # Sports by name
     "soccer", "football", "nfl", "nba", "nhl", "mlb",
     "ufc", "mma", "boxing", "wrestling",
     "tennis", "golf", "f1", "formula 1", "indycar",
     "rugby", "cricket", "hockey", "baseball", "basketball",
     "afl", "aussie rules",
-    # Competitions / events
+    # Competitions / leagues
     "world cup", "champions league", "europa league", "premier league",
     "la liga", "serie a", "bundesliga", "ligue 1", "mls",
-    "copa", "grand slam", "wimbledon", "us open", "french open", "australian open",
+    "copa america", "grand slam", "wimbledon", "french open", "australian open",
     "super bowl", "world series", "stanley cup", "nba finals",
-    "grand prix", "masters", "open championship",
+    "grand prix", "open championship",
     "gold cup", "nations league",
-    # Score / stat outcomes
-    "score", "goal", "point", "run", "inning", "set",
-    "knockout", "ko", "tko", "submission", "decision",
-    "medal", "podium",
+    # Sport-specific outcome terms
+    "goal", "inning", "knockout", "ko", "tko", "submission", "decision",
 }
 
 
