@@ -45,6 +45,7 @@ MAX_DAYS_OUT = 14 * 86_400
 MIN_TRIGGERS = 2  # any 2 of T1/T2/T3/T5; T5 counts double when present
 
 _skip_log_count = 0  # log first N skips at INFO so Railway shows why
+_date_diag_done = False  # log date fields of first market once per session
 
 # Per-scan skip counters — reset by bot.py before each scan
 _skip_counts: dict[str, int] = {}
@@ -108,7 +109,7 @@ def _size_position(n_triggers: int) -> tuple[float, float, float, str]:
 
 
 async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSignal | None:
-    global _skip_log_count
+    global _skip_log_count, _date_diag_done
 
     question    = market.get("question") or market.get("title") or ""
     market_id   = market.get("id") or market.get("conditionId") or ""
@@ -119,6 +120,15 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         _skip("no-token")
         logger.debug("SKIP no-token: %s", question[:60])
         return None
+
+    if not _date_diag_done:
+        _date_diag_done = True
+        logger.info(
+            "DATE-DIAG first market: resolutionTime=%s endDate=%s startTime=%s gameStartTime=%s q=%s",
+            market.get("resolutionTime"), market.get("endDate"),
+            market.get("startTime"), market.get("gameStartTime"),
+            question[:50],
+        )
 
     secs = client.seconds_to_resolution(market)
     if secs is None:

@@ -331,7 +331,7 @@ async def daily_report(app: Application, pos_mgr: PositionManager) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
-    logger.info("Colossus starting up…")
+    logger.info("Colossus starting up… build=2026-07-24-v2")
 
     global _traded_this_session
     _traded_this_session = _load_daily_count()
