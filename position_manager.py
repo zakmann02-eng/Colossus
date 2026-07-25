@@ -218,6 +218,20 @@ class PositionManager:
             if not slug or slug in tracked_slugs or slug in self._closed_this_session:
                 continue
 
+            # Only adopt positions in sports markets — never touch Storm's temp/weather positions
+            fake_market = {
+                "slug": slug,
+                "eventSlug": slug,
+                "question": slug.replace("-", " "),
+                "title": slug.replace("-", " "),
+                "category": "",
+                "active": True,
+                "closed": False,
+            }
+            if not self._client._is_allowed(fake_market):
+                logger.info("sync_from_exchange: SKIPPING non-sport position %s", slug)
+                continue
+
             token_id = (
                 pos.get("asset")
                 or pos.get("tokenId")
