@@ -148,13 +148,24 @@ class PolymarketClient:
             return []
         loop = asyncio.get_event_loop()
 
+        _market_keys_logged = False
+
         def _build_markets(events):
+            nonlocal _market_keys_logged
             markets = []
             for event in events:
                 event_slug = event.get("slug") or event.get("eventSlug") or ""
                 sub = event.get("markets") or []
                 if sub:
                     for m in sub:
+                        if not _market_keys_logged:
+                            _market_keys_logged = True
+                            logger.info(
+                                "MARKET-KEYS diag: event.endDate=%s event.startTime=%s "
+                                "market keys=%s",
+                                event.get("endDate"), event.get("startTime"),
+                                list(m.keys()),
+                            )
                         row = {**event, **m}
                         row["active"]         = event.get("active", True)
                         row["closed"]         = False
