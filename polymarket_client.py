@@ -50,6 +50,13 @@ _BLOCKED = {
     "mvp", "most valuable", "award", "golden boot", "ballon d'or",
     # Exact score markets — specific scoreline props, not binary outcomes
     "exact score", "correct score", "scoreline",
+    # Weather / temperature markets — tc-temp-* slugs, Miami/NYC/LA daily high, etc.
+    "temperature", "temp ", "weather", "°f", "°c", "humidity",
+    "rainfall", "precipitation", "tc-temp", "daily high", "daily low",
+    "heat index", "wind speed", "snowfall",
+    # Crypto / financial markets
+    "bitcoin", "ethereum", "btc", "eth", "crypto", "stock", "nasdaq",
+    "s&p", "fed funds", "treasury",
 }
 
 # At least one of these must appear in question/title/category/tags for a market to be tradeable.
@@ -286,6 +293,8 @@ class PolymarketClient:
             (market.get("question") or "").lower(),
             (market.get("title") or "").lower(),
             (market.get("category") or "").lower(),
+            (market.get("slug") or "").lower(),
+            (market.get("eventSlug") or "").lower(),
             " ".join(
                 t.lower() if isinstance(t, str)
                 else (t.get("label") or t.get("name") or "").lower()
