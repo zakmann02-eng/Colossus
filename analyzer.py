@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 
 MIN_PRICE    = 0.05
 MAX_PRICE    = 0.95
-MIN_VOL_24H  = 5.0
-MAX_DAYS_OUT = 14 * 86_400
+MIN_VOL_24H  = 0.0   # API does not return volume24hr — gate disabled
+MAX_DAYS_OUT = 30 * 86_400  # extended to 30 days to catch NFL preseason
 MIN_TRIGGERS = 2  # any 2 of T1/T2/T3/T5; T5 counts double when present
 
 _skip_log_count = 0  # log first N skips at INFO so Railway shows why
@@ -150,16 +150,8 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         logger.debug("SKIP far-future(%.1fd): %s", secs / 86400, question[:60])
         return None
 
-    vol_24h = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
-    if vol_24h < MIN_VOL_24H:
-        _skip("low-vol")
-        if _skip_log_count < 10:
-            _skip_log_count += 1
-            logger.info("SKIP vol(%.0f < %.0f) [diag]: slug=%s q=%s",
-                        vol_24h, MIN_VOL_24H, market_slug[:30], question[:50])
-        else:
-            logger.debug("SKIP vol(%.0f): %s", vol_24h, question[:60])
-        return None
+    # Log every upcoming market at INFO so we know what's in the trading window
+    logger.info("UPCOMING(%.1fd): slug=%s q=%s", secs / 86400, market_slug[:35], question[:60])
 
     price = await client.get_market_price(market, token_id)
     if not price:
