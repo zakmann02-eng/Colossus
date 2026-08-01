@@ -264,32 +264,39 @@ class PolymarketClient:
             return []
 
     def _is_allowed(self, market):
+        # Helper: is this market's game within the next 7 days?
+        def _is_near_future():
+            raw = market.get("gameStartTime")
+            if not raw:
+                return False
+            try:
+                ts = float(raw) if isinstance(raw, (int, float)) else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+                secs = ts - time.time()
+                return -6 * 3600 <= secs <= 7 * 86400  # live or upcoming this week
+            except Exception:
+                return False
+
+        near = _is_near_future()
+
         if not market.get("active", True) or market.get("closed", False):
-            # Promote to INFO for near-future games so we can see what's listed but inactive
-            game_raw = market.get("gameStartTime")
-            if game_raw:
-                try:
-                    if isinstance(game_raw, (int, float)):
-                        game_ts = float(game_raw)
-                    else:
-                        game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
-                    now_ts = time.time()
-                    if game_ts <= now_ts + 7 * 86400:
-                        logger.info(
-                            "INACTIVE near-game: active=%s closed=%s gameStartTime=%s q=%s",
-                            market.get("active"), market.get("closed"),
-                            game_raw, (market.get("question") or market.get("title") or "")[:60],
-                        )
-                except Exception:
-                    pass
+            if near:
+                logger.info(
+                    "NEAR-GAME BLOCKED active/closed: active=%s closed=%s gameStartTime=%s q=%s",
+                    market.get("active"), market.get("closed"),
+                    market.get("gameStartTime"), (market.get("question") or market.get("title") or "")[:60],
+                )
             logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
+
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
             event_state = str(event_state_raw.get("status") or event_state_raw.get("state") or "").upper()
         else:
             event_state = str(event_state_raw or "").upper()
         if event_state in ("FINAL", "COMPLETED", "POST_GAME", "POSTGAME", "ENDED", "RESOLVED"):
+            if near:
+                logger.info("NEAR-GAME BLOCKED eventState=%s q=%s", event_state,
+                            (market.get("question") or "")[:60])
             return False
 
         game_raw = market.get("gameStartTime")
@@ -320,6 +327,9 @@ class PolymarketClient:
         ])
         for kw in _BLOCKED:
             if kw in text:
+                if near:
+                    logger.info("NEAR-GAME BLOCKED keyword='%s' q=%s", kw,
+                                (market.get("question") or "")[:80])
                 logger.debug("BLOCKED keyword '%s': %s", kw, text[:80])
                 return False
 
@@ -331,6 +341,9 @@ class PolymarketClient:
             market.get("sportradarEventId")
         )
         if not has_game_data and not any(kw in text for kw in _SPORT_REQUIRED):
+            if near:
+                logger.info("NEAR-GAME BLOCKED non-sport q=%s text=%s",
+                            (market.get("question") or "")[:60], text[:80])
             logger.debug("BLOCKED non-sport: %s", text[:80])
             return False
         return True
