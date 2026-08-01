@@ -265,6 +265,23 @@ class PolymarketClient:
 
     def _is_allowed(self, market):
         if not market.get("active", True) or market.get("closed", False):
+            # Promote to INFO for near-future games so we can see what's listed but inactive
+            game_raw = market.get("gameStartTime")
+            if game_raw:
+                try:
+                    if isinstance(game_raw, (int, float)):
+                        game_ts = float(game_raw)
+                    else:
+                        game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
+                    now_ts = time.time()
+                    if game_ts <= now_ts + 7 * 86400:
+                        logger.info(
+                            "INACTIVE near-game: active=%s closed=%s gameStartTime=%s q=%s",
+                            market.get("active"), market.get("closed"),
+                            game_raw, (market.get("question") or market.get("title") or "")[:60],
+                        )
+                except Exception:
+                    pass
             logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
         event_state_raw = market.get("eventState")
