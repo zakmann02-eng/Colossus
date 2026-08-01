@@ -4,7 +4,7 @@ Trigger evaluation and trade decision logic.
 Pre-filters (all must pass):
   - Price between 0.05 and 0.95
   - Minimum $75 24h volume
-  - Resolution time must be known and within 60 days
+  - Resolution time must be known and within 7 days (live or this week only)
 
 Requires 2+ effective triggers to fire a trade:
   T1   Price outside 45-55% range (price bias signal)
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 MIN_PRICE    = 0.05
 MAX_PRICE    = 0.95
 MIN_VOL_24H  = 0.0   # API does not return volume24hr — gate disabled
-MAX_DAYS_OUT = 60 * 86_400  # extended to 60 days to catch NFL preseason + early regular season
+MAX_DAYS_OUT = 7 * 86_400   # live games + this week only — no far-future markets
 MIN_TRIGGERS = 2  # any 2 of T1/T2/T3/T5; T5 counts double when present
 
 _skip_log_count = 0  # log first N skips at INFO so Railway shows why
