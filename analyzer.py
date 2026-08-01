@@ -7,14 +7,16 @@ Pre-filters (all must pass):
   - Resolution time must be known and within 60 days
 
 Requires 2+ effective triggers to fire a trade:
-  T1  Price outside 45-55% range (price bias signal)
-  T2  Price moved >= 0.5% in last 15 min (momentum)
-  T3  24h volume > 2x daily average (unusual activity)
-  T5  Bookmaker consensus >= 3% edge over Polymarket price (bonus signal)
+  T1   Price outside 45-55% range (price bias signal)
+  T1s  Strong price bias: outside 35-65% range — counts as 2nd trigger, fires standalone
+  T2   Price moved >= 0.5% in last 15 min (momentum)
+  T3   24h volume > 2x daily average (unusual activity)
+  T5   Bookmaker consensus >= 3% edge over Polymarket price (bonus signal)
 
   T5 is a high-value bonus: when it fires it counts double (as 2 triggers),
   defines trade direction, and pushes to HIGH conviction.
-  T1/T2/T3 can fire a trade independently with any 2 of them.
+  T1s fires standalone (price < 35% or > 65% = clear directional lean).
+  T1/T2/T3 can also fire a trade with any 2 of them.
 
 Position sizing by effective triggers fired:
   2 triggers → LOW  → $0.20–$0.35 · TP 15% · SL 6%
@@ -64,6 +66,8 @@ def get_skip_summary() -> str:
 
 T1_LOW  = 0.45
 T1_HIGH = 0.55
+T1_STRONG_LOW  = 0.35  # below this → T1 counts double (fires standalone)
+T1_STRONG_HIGH = 0.65  # above this → T1 counts double (fires standalone)
 T2_MOVE = 0.005  # 0.5% momentum threshold
 T3_MULT = 2.0
 T5_MIN_EDGE = 0.03
@@ -191,7 +195,12 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     triggers: list[str] = []
 
     if price < T1_LOW or price > T1_HIGH:
-        triggers.append(f"T1:prob={price:.2f}")
+        # Strong price bias (outside 35-65%) counts as 2 triggers — fires standalone
+        strong = price < T1_STRONG_LOW or price > T1_STRONG_HIGH
+        t1_label = f"T1:prob={price:.2f}"
+        triggers.append(t1_label)
+        if strong:
+            triggers.append(f"T1s:prob={price:.2f}")  # second count for strong signal
 
     price_15m = await client.get_price_15min_ago(market, token_id)
     if price_15m and price_15m > 0:
@@ -199,10 +208,11 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         if move >= T2_MOVE:
             triggers.append(f"T2:move={move:.1%}")
 
+    vol_24h   = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
     vol_all   = _safe_float(market.get("volume") or market.get("volumeNum"))
     days_est  = max(1.0, _safe_float(market.get("daysAgo"), 30.0))
     daily_avg = vol_all / days_est if vol_all else 0
-    if daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
+    if vol_24h > 0 and daily_avg > 0 and vol_24h > T3_MULT * daily_avg:
         triggers.append(f"T3:vol24h={vol_24h:.0f}")
 
     # T5: bookmaker consensus diverges from Polymarket by >= 3%
