@@ -141,7 +141,10 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         return None
 
     # Past games and far-future markets go to debug — they're expected and burn INFO quota
-    if secs <= 0:
+    # Allow a 6-hour live window: game may have started but market is still open for in-play trading.
+    LIVE_WINDOW = -6 * 3600
+    is_live = LIVE_WINDOW <= secs <= 0 and market.get("active", True) and not market.get("closed", False)
+    if secs <= 0 and not is_live:
         _skip("past")
         logger.debug("SKIP past(%.1fd): %s", secs / 86400, question[:60])
         return None
@@ -150,8 +153,11 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         logger.debug("SKIP far-future(%.1fd): %s", secs / 86400, question[:60])
         return None
 
-    # Log every upcoming market at INFO so we know what's in the trading window
-    logger.info("UPCOMING(%.1fd): slug=%s q=%s", secs / 86400, market_slug[:35], question[:60])
+    # Log every upcoming/live market at INFO so we know what's in the trading window
+    if is_live:
+        logger.info("LIVE(%.0fmin ago): slug=%s q=%s", abs(secs) / 60, market_slug[:35], question[:60])
+    else:
+        logger.info("UPCOMING(%.1fd): slug=%s q=%s", secs / 86400, market_slug[:35], question[:60])
 
     price = await client.get_market_price(market, token_id)
     if not price:

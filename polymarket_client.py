@@ -283,7 +283,7 @@ class PolymarketClient:
                 else:
                     game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
                 now_ts = time.time()
-                if game_ts > now_ts + 7 * 86400:
+                if game_ts > now_ts + 60 * 86400:
                     logger.debug("BLOCKED far-future: %s", (market.get("question") or "")[:60])
                     return False
             except Exception:
