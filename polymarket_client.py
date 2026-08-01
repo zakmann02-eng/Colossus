@@ -704,28 +704,45 @@ class PolymarketClient:
             market.get("resolutionTime") or market.get("closeTime") or market.get("closedTime") or
             market.get("endDate")
         )
+
+        # Compute game start time — used to prefer it over endDate when earlier.
+        # A market for an Aug 4 game may have endDate=Aug 9 (settlement), but the
+        # meaningful deadline for the trading window is the game start, not settlement.
+        game_secs = None
+        for gst_key in ("gameStartTime", "startTime"):
+            game_raw = market.get(gst_key)
+            if not game_raw:
+                continue
+            try:
+                if isinstance(game_raw, (int, float)):
+                    game_ts = float(game_raw)
+                else:
+                    game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
+                game_secs = game_ts - time.time()
+                break
+            except Exception:
+                pass
+
         if not raw:
-            for gst_key in ("gameStartTime", "startTime"):
-                game_raw = market.get(gst_key)
-                if not game_raw:
-                    continue
-                try:
-                    if isinstance(game_raw, (int, float)):
-                        game_ts = float(game_raw)
-                    else:
-                        game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
-                    return (game_ts + 4 * 3600) - time.time()
-                except Exception:
-                    pass
+            if game_secs is not None:
+                # No end date at all — use game start + 4h grace for live detection
+                return game_secs + 4 * 3600
             raw = market.get("startDate")
             if not raw:
                 return None
+
         try:
             end_ts = (
                 float(raw) if isinstance(raw, (int, float))
                 else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
             )
-            return end_ts - time.time()
+            end_secs = end_ts - time.time()
+            # Prefer game start when it's sooner than the settlement date.
+            # This lets markets with endDate beyond 7 days still trade when the
+            # actual game is within the 7-day window.
+            if game_secs is not None and game_secs < end_secs:
+                return game_secs
+            return end_secs
         except Exception:
             return None
 
