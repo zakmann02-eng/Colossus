@@ -145,79 +145,65 @@ class PolymarketClient:
     # ---------------------------------------------------------------- #
 
     async def get_sports_markets(self, limit=200):
-        us_markets = await self._get_us_sdk_markets(limit)
-        allowed = [m for m in us_markets if self._is_allowed(m)]
-        logger.info("Polymarket.US SDK: %d markets, %d allowed", len(us_markets), len(allowed))
+        allowed, total = await self._get_us_sdk_markets(limit)
+        logger.info("Polymarket.US SDK: %d markets scanned, %d allowed", total, len(allowed))
         return allowed
 
-    async def _get_us_sdk_markets(self, limit=200) -> list[dict]:
+    async def _get_us_sdk_markets(self, limit=200) -> tuple[list[dict], int]:
+        """Stream-filter markets page by page.
+
+        Returns (allowed_markets, total_scanned).
+        Only allowed markets are kept in memory — rejected markets are never
+        accumulated, avoiding the ~100 MB spike from holding all 48k dicts.
+        """
         if not self._us_client:
-            return []
+            return [], 0
         loop = asyncio.get_event_loop()
 
-        _market_keys_logged = False
+        # Only the fields downstream code actually reads.
+        _KEEP = (
+            "id", "conditionId",
+            "question", "title",
+            "slug", "marketSlug", "eventSlug",
+            "active", "closed",
+            "eventState",
+            "gameStartTime", "startTime", "startDate",
+            "resolutionTime", "closeTime", "closedTime", "endDate",
+            "volume", "volumeNum", "volume24hr", "volume24Hour",
+            "daysAgo",
+            "teams", "sportradarGameId", "sportradarEventId",
+            "category", "tags",
+            "outcomes", "outcomePrices", "marketSides", "clobTokenIds", "tokens",
+        )
 
-        def _build_markets(events):
-            nonlocal _market_keys_logged
-            markets = []
-            for event in events:
-                event_slug = event.get("slug") or event.get("eventSlug") or ""
-                sub = event.get("markets") or []
-                if sub:
-                    for m in sub:
-                        if not _market_keys_logged:
-                            _market_keys_logged = True
-                            logger.info(
-                                "MARKET-KEYS diag: event.endDate=%s event.startTime=%s "
-                                "market keys=%s",
-                                event.get("endDate"), event.get("startTime"),
-                                list(m.keys()),
-                            )
-                        row = {**event, **m}
-                        row["active"]         = event.get("active", True)
-                        row["closed"]         = False
-                        row["slug"]           = m.get("slug") or event_slug
-                        row["eventSlug"]      = event_slug
-                        row["question"]       = m.get("question") or m.get("title") or event.get("title") or ""
-                        row["volume24hr"]     = event.get("volume24hr") or m.get("volume24hr") or 0
-                        row["resolutionTime"] = (
-                            m.get("resolutionTime") or m.get("closeTime") or m.get("closedTime") or
-                            event.get("resolutionTime") or event.get("closeTime") or event.get("closedTime") or
-                            event.get("endDate") or m.get("endDate") or ""
-                        )
-                        row["eventState"]     = event.get("eventState") or ""
-                        markets.append(row)
-                else:
-                    event["slug"]     = event_slug
-                    event["question"] = event.get("question") or event.get("title") or ""
-                    markets.append(event)
-            return markets
+        def _slim_row(event: dict, m: dict) -> dict:
+            event_slug = event.get("slug") or event.get("eventSlug") or ""
+            row: dict = {}
+            for k in _KEEP:
+                v = m.get(k)
+                if v is None:
+                    v = event.get(k)
+                if v is not None:
+                    row[k] = v
+            row["active"]        = event.get("active", True)
+            row["closed"]        = False
+            row["slug"]          = m.get("slug") or event_slug
+            row["eventSlug"]     = event_slug
+            row["question"]      = m.get("question") or m.get("title") or event.get("title") or ""
+            row["volume24hr"]    = event.get("volume24hr") or m.get("volume24hr") or 0
+            row["resolutionTime"] = (
+                m.get("resolutionTime") or m.get("closeTime") or m.get("closedTime") or
+                event.get("resolutionTime") or event.get("closeTime") or event.get("closedTime") or
+                event.get("endDate") or m.get("endDate") or ""
+            )
+            row["eventState"]    = event.get("eventState") or ""
+            return row
 
         def _extract_events(data):
             return (
                 data if isinstance(data, list)
                 else (data or {}).get("data") or (data or {}).get("events") or (data or {}).get("results") or []
             ) if data else []
-
-        now_ts = time.time()
-
-        def _upcoming_in(markets):
-            window = now_ts + 7 * 86_400
-            for m in markets:
-                raw = m.get("gameStartTime")
-                if not raw:
-                    continue
-                try:
-                    if isinstance(raw, (int, float)):
-                        ts = float(raw)
-                    else:
-                        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
-                    if now_ts < ts < window:
-                        logger.debug("_upcoming_in: gameStartTime=%s in window", raw)
-                        return True
-                except Exception:
-                    pass
-            return False
 
         async def _fetch_page(off: int) -> list:
             o = off
@@ -236,32 +222,41 @@ class PolymarketClient:
                 return []
 
         try:
-            all_markets: list[dict] = []
+            allowed: list[dict] = []
+            total_scanned = 0
 
             for offset in range(0, 32_000, 200):
                 page_events = await _fetch_page(offset)
                 if not page_events:
-                    logger.info("Scan stopped at offset %d — %d markets collected", offset, len(all_markets))
+                    logger.info("Scan stopped at offset %d — %d scanned, %d allowed",
+                                offset, total_scanned, len(allowed))
                     break
-                page_markets = _build_markets(page_events)
-                all_markets.extend(page_markets)
-                if offset == 0:
-                    logger.info("SDK page offset=0: %d events, sample keys: %s",
-                                len(page_events), list(page_events[0].keys()))
-                else:
-                    logger.info("Scan offset=%d: +%d markets (%d total)",
-                                offset, len(page_markets), len(all_markets))
 
-            game_times = sorted(set(
-                m.get("gameStartTime", "")[:10]
-                for m in all_markets if m.get("gameStartTime")
-            ))
-            logger.info("gameStartTime latest dates across %d markets: %s",
-                        len(all_markets), game_times[-10:])
-            return all_markets
+                for event in page_events:
+                    sub = event.get("markets") or []
+                    if sub:
+                        for m in sub:
+                            row = _slim_row(event, m)
+                            total_scanned += 1
+                            if self._is_allowed(row):
+                                allowed.append(row)
+                    else:
+                        event_slug = event.get("slug") or ""
+                        row = {k: event[k] for k in _KEEP if k in event}
+                        row["slug"]     = event_slug
+                        row["eventSlug"] = event_slug
+                        row["question"] = event.get("question") or event.get("title") or ""
+                        total_scanned += 1
+                        if self._is_allowed(row):
+                            allowed.append(row)
+
+                logger.info("Scan offset=%d: %d scanned, %d allowed so far",
+                            offset, total_scanned, len(allowed))
+
+            return allowed, total_scanned
         except Exception as exc:
             logger.warning("US SDK events.list failed: %s", exc)
-            return []
+            return [], 0
 
     def _is_allowed(self, market):
         # Helper: is this market's game within the next 7 days?
