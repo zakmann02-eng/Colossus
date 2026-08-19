@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -227,8 +228,14 @@ class PolymarketClient:
         try:
             allowed: list[dict] = []
             total_scanned = 0
+            # Cap scan at MAX_EVENTS_SCAN events (default 4000).
+            # The gateway returns events most-recent-first; current 2026 markets
+            # live in the first pages. Historical past markets in deeper pages are
+            # filtered by the date check in evaluate_market anyway, so scanning
+            # them costs 3+ minutes per cycle for zero benefit.
+            max_events = int(os.getenv("MAX_EVENTS_SCAN", "4000"))
 
-            for offset in range(0, 32_000, 200):
+            for offset in range(0, max_events, 200):
                 page_events = await _fetch_page(offset)
                 if not page_events:
                     logger.info("Scan stopped at offset %d — %d scanned, %d allowed",
