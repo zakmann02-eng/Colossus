@@ -30,7 +30,10 @@ _BLOCKED = {
     "esport", "e-sport", "overwatch", "fortnite", "pubg", "apex legends",
     "map 1", "map 2", "map 3", "map 4", "map 5",
     # Spread / handicap / prop markets — CLOB rejects these
-    "spread:", "handicap", "(-", "(+",
+    # Note: "(-" and "(+" removed — too broad, catches legitimate market title formats.
+    # Use explicit spread phrases instead.
+    "spread:", "point spread", "handicap", "cover the spread", "ats ",
+    "pts handicap", "run line", "puck line",
     # Game segments — only trade full-game markets
     "first half", "second half", "1st half", "2nd half", "halftime", "half time",
     "first quarter", "second quarter", "third quarter", "fourth quarter",
@@ -252,6 +255,25 @@ class PolymarketClient:
 
                 logger.info("Scan offset=%d: %d scanned, %d allowed so far",
                             offset, total_scanned, len(allowed))
+
+            # Log upcoming gameStartTime dates that made it through the filter,
+            # and sample questions so we can see what's actually in the allowed pool.
+            now_ts = time.time()
+            upcoming = [
+                m for m in allowed
+                if (gst := m.get("gameStartTime")) and
+                   isinstance(gst, str) and
+                   time.mktime(time.strptime(gst[:10], "%Y-%m-%d")) > now_ts - 86400
+            ]
+            upcoming_dates = sorted({m.get("gameStartTime", "")[:10] for m in upcoming if m.get("gameStartTime")})
+            logger.info("Allowed upcoming gameStartTimes: %s (count=%d)", upcoming_dates[-10:], len(upcoming))
+            if upcoming:
+                for m in upcoming[:5]:
+                    logger.info("UPCOMING-ALLOWED: q=%s gst=%s", m.get("question", "")[:80], m.get("gameStartTime", "")[:10])
+            else:
+                # Sample a few allowed market questions so we can see what's in the pool
+                for m in allowed[:3]:
+                    logger.info("ALLOWED-SAMPLE: q=%s gst=%s", m.get("question", "")[:80], m.get("gameStartTime", "")[:10])
 
             return allowed, total_scanned
         except Exception as exc:
