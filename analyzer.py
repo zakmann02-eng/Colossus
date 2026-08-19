@@ -207,6 +207,11 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         move = abs(price - price_15m) / price_15m
         if move >= T2_MOVE:
             triggers.append(f"T2:move={move:.1%}")
+        else:
+            logger.info("T2-miss: move=%.2f%% (need %.1f%%) price=%.3f p15m=%.3f q=%s",
+                        move * 100, T2_MOVE * 100, price, price_15m, question[:50])
+    else:
+        logger.info("T2-no-history: token=%s q=%s", str(token_id)[:30], question[:50])
 
     vol_24h   = _safe_float(market.get("volume24hr") or market.get("volume24Hour"))
     vol_all   = _safe_float(market.get("volume") or market.get("volumeNum"))
@@ -231,8 +236,13 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     effective_count = len(triggers) + (1 if has_t5 else 0)
 
     if effective_count < MIN_TRIGGERS:
-        logger.debug("SKIP triggers=%d effective=%d (price=%.2f): %s",
-                     len(triggers), effective_count, price, question[:60])
+        logger.info("SKIP-trigger: triggers=%d effective=%d price=%.3f p15m=%s T1=%s T3=%s T5=%s q=%s",
+                    len(triggers), effective_count, price,
+                    f"{price_15m:.3f}" if price_15m else "none",
+                    "Y" if any(t.startswith("T1") for t in triggers) else "N",
+                    "Y" if any(t.startswith("T3") for t in triggers) else "N",
+                    "Y" if any(t.startswith("T5") for t in triggers) else "N",
+                    question[:60])
         scan_log.add(market_slug, question, price, "SKIP",
                      f"only {len(triggers)} trigger(s) fired (effective={effective_count}, need {MIN_TRIGGERS})",
                      triggers)
