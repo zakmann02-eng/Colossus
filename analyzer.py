@@ -8,7 +8,7 @@ Pre-filters (all must pass):
 
 Requires 2+ effective triggers to fire a trade:
   T1   Price outside 45-55% range (price bias signal)
-  T1s  Strong price bias: outside 35-65% range — counts as 2nd trigger, fires standalone
+  T1s  Strong price bias: outside 40-60% range — counts as 2nd trigger, fires standalone
   T2   Price moved >= 0.5% in last 15 min (momentum)
   T3   24h volume > 2x daily average (unusual activity)
   T5   Bookmaker consensus >= 3% edge over Polymarket price (bonus signal)
@@ -66,8 +66,8 @@ def get_skip_summary() -> str:
 
 T1_LOW  = 0.45
 T1_HIGH = 0.55
-T1_STRONG_LOW  = 0.35  # below this → T1 counts double (fires standalone)
-T1_STRONG_HIGH = 0.65  # above this → T1 counts double (fires standalone)
+T1_STRONG_LOW  = 0.40  # below this → T1 counts double (fires standalone)
+T1_STRONG_HIGH = 0.60  # above this → T1 counts double (fires standalone)
 T2_MOVE = 0.005  # 0.5% momentum threshold
 T3_MULT = 2.0
 T5_MIN_EDGE = 0.03
