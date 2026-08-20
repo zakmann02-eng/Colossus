@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from sports_data import get_bookmaker_signal
+from weather_data import get_weather_signal
 from performance_tracker import get_size_multiplier
 import scan_log
 
@@ -63,6 +64,13 @@ def get_skip_summary() -> str:
     if not _skip_counts:
         return "no skips"
     return " | ".join(f"{k}={v}" for k, v in sorted(_skip_counts.items(), key=lambda x: -x[1]))
+
+_WEATHER_KW = {
+    "temperature", "temp ", "°f", "°c", "daily high", "daily low",
+    "high temp", "low temp", "tc-temp", "weather", "rainfall",
+    "precipitation", "heat index", "wind speed", "snowfall", "humidity",
+    "forecast", "degrees",
+}
 
 T1_LOW  = 0.45
 T1_HIGH = 0.55
@@ -192,6 +200,9 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
         scan_log.add(market_slug, question, price, "WARN", "no CLOB last-trade — continuing", [])
         # Continue evaluation — position_manager has portfolio price fallback for TP/SL
 
+    market_text = (question + " " + market_slug).lower()
+    is_weather_market = any(kw in market_text for kw in _WEATHER_KW)
+
     triggers: list[str] = []
 
     if price < T1_LOW or price > T1_HIGH:
@@ -230,26 +241,47 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     except Exception as exc:
         logger.debug("T5 error: %s", exc)
 
-    # T5 counts as 2 triggers — bookmaker edge is a confirmed external signal.
-    # A lone T5 (effective_count=2) is sufficient to trade.
+    # T6: weather forecast signal — required for all weather markets.
+    # Weather markets that lack a T6 edge are skipped outright; T1/T2/T3 alone
+    # are not sufficient because the forecast may already be priced in.
+    weather_side: str | None = None
+    if is_weather_market:
+        try:
+            w_result = await get_weather_signal(market, price, client._session)
+            if w_result is not None:
+                w_edge, weather_side = w_result
+                triggers.append(f"T6:weather_edge={w_edge:.2f}")
+        except Exception as exc:
+            logger.debug("T6 weather error: %s", exc)
+        if not any(t.startswith("T6:") for t in triggers):
+            _skip("weather-no-forecast")
+            logger.info("SKIP weather-no-forecast: slug=%s q=%s", market_slug[:35], question[:60])
+            scan_log.add(market_slug, question, price, "SKIP",
+                         "weather market: no forecast edge (T6 required)", triggers)
+            return None
+
+    # T5 and T6 each count as 2 triggers — confirmed external signals.
+    # A lone T5 or T6 (effective_count=2) is sufficient to trade.
     has_t5 = any(t.startswith("T5:") for t in triggers)
-    effective_count = len(triggers) + (1 if has_t5 else 0)
+    has_t6 = any(t.startswith("T6:") for t in triggers)
+    effective_count = len(triggers) + (1 if has_t5 else 0) + (1 if has_t6 else 0)
 
     if effective_count < MIN_TRIGGERS:
-        logger.info("SKIP-trigger: triggers=%d effective=%d price=%.3f p15m=%s T1=%s T3=%s T5=%s q=%s",
+        logger.info("SKIP-trigger: triggers=%d effective=%d price=%.3f p15m=%s T1=%s T3=%s T5=%s T6=%s q=%s",
                     len(triggers), effective_count, price,
                     f"{price_15m:.3f}" if price_15m else "none",
                     "Y" if any(t.startswith("T1") for t in triggers) else "N",
                     "Y" if any(t.startswith("T3") for t in triggers) else "N",
                     "Y" if any(t.startswith("T5") for t in triggers) else "N",
+                    "Y" if any(t.startswith("T6") for t in triggers) else "N",
                     question[:60])
         scan_log.add(market_slug, question, price, "SKIP",
-                     f"only {len(triggers)} trigger(s) fired (effective={effective_count}, need {MIN_TRIGGERS})",
+                     f"only {len(triggers)} trigger(s) (effective={effective_count}, need {MIN_TRIGGERS})",
                      triggers)
         return None
 
-    # T5 defines trade direction when available; fall back to price bias.
-    side                  = bm_side if bm_side else _decide_side(price, market)
+    # T6 > T5 defines trade direction when available; fall back to price bias.
+    side = weather_side if weather_side else (bm_side if bm_side else _decide_side(price, market))
     amount, tp, sl, label = _size_position(effective_count)
     score                 = min(100, effective_count * 25)
 
