@@ -321,15 +321,16 @@ class PolymarketClient:
                 return False
 
         # Fast date pre-filter: reject markets whose resolution/end date is clearly in
-        # the past. Polymarket.US returns thousands of unresolved 2025-season markets
-        # as active=true — this rejects them before keyword/category checks.
-        today_utc = time.strftime("%Y-%m-%d", time.gmtime())
+        # the past. Use yesterday as the cutoff (not today) so that live US evening
+        # games (endDate = yesterday in UTC terms) still pass through.
+        # evaluate_market handles the precise 6-hour live window.
+        yesterday_utc = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86400))
         for field in ("endDate", "resolutionTime", "closeTime"):
             val = market.get(field)
             if val and isinstance(val, str) and len(val) >= 10:
-                if val[:10] < today_utc:
+                if val[:10] < yesterday_utc:
                     return False
-                break  # at least one future date found — allow through
+                break  # date is recent enough — allow through
 
         near = _is_near_future()
 
