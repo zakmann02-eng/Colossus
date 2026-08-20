@@ -240,8 +240,9 @@ class PolymarketClient:
             total_scanned = 0
             max_events = int(os.getenv("MAX_EVENTS_SCAN", "10000"))
             # Stop after this many consecutive pages with zero new allowed markets.
-            # Avoids scanning 17k+ stale events when Polymarket.US has sparse listings.
-            _dry_page_limit = int(os.getenv("SCAN_DRY_PAGE_LIMIT", "15"))
+            # Must be > 32 — the catalog has ~32 pages of stale Nov-2025 markets
+            # before the live/future markets appear at offset ~6400.
+            _dry_page_limit = int(os.getenv("SCAN_DRY_PAGE_LIMIT", "60"))
             _dry_pages = 0
 
             for offset in range(0, max_events, 200):
