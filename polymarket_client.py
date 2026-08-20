@@ -214,6 +214,10 @@ class PolymarketClient:
                 else (data or {}).get("data") or (data or {}).get("events") or (data or {}).get("results") or []
             ) if data else []
 
+        # Filter to events whose end date is today or later so we never scan
+        # the large backlog of unresolved past-season markets.
+        today_str = time.strftime("%Y-%m-%d", time.gmtime())
+
         async def _fetch_page(off: int) -> list:
             o = off
             try:
@@ -222,6 +226,7 @@ class PolymarketClient:
                     lambda: self._us_client.events.list({
                         "limit": 200,
                         "active": True,
+                        "end_date_min": today_str,
                         "offset": o,
                     }),
                 )
@@ -233,12 +238,7 @@ class PolymarketClient:
         try:
             allowed: list[dict] = []
             total_scanned = 0
-            # Cap scan at MAX_EVENTS_SCAN events (default 4000).
-            # The gateway returns events most-recent-first; current 2026 markets
-            # live in the first pages. Historical past markets in deeper pages are
-            # filtered by the date check in evaluate_market anyway, so scanning
-            # them costs 3+ minutes per cycle for zero benefit.
-            max_events = int(os.getenv("MAX_EVENTS_SCAN", "4000"))
+            max_events = int(os.getenv("MAX_EVENTS_SCAN", "10000"))
 
             for offset in range(0, max_events, 200):
                 page_events = await _fetch_page(offset)
