@@ -54,17 +54,13 @@ _BLOCKED = {
     "mvp", "most valuable", "award", "golden boot", "ballon d'or",
     # Exact score markets — specific scoreline props, not binary outcomes
     "exact score", "correct score", "scoreline",
-    # Weather / temperature markets — tc-temp-* slugs, Miami/NYC/LA daily high, etc.
-    "temperature", "temp ", "weather", "°f", "°c", "humidity",
-    "rainfall", "precipitation", "tc-temp", "daily high", "daily low",
-    "heat index", "wind speed", "snowfall",
     # Crypto / financial markets
     "bitcoin", "ethereum", "btc", "eth", "crypto", "stock", "nasdaq",
     "s&p", "fed funds", "treasury",
 }
 
-# At least one of these must appear in question/title/category/tags for a market to be tradeable.
-# Blocks geopolitical, tech, entertainment, and other non-sports markets.
+# At least one sport keyword OR one weather keyword must appear for a market to be tradeable.
+# Blocks geopolitical, tech, entertainment, and other non-target markets.
 _SPORT_REQUIRED = {
     # Strong match/contest signals
     "vs", "v.", " vs.", "match", "fight", "bout",
@@ -84,6 +80,15 @@ _SPORT_REQUIRED = {
     "gold cup", "nations league",
     # Sport-specific outcome terms
     "goal", "inning", "knockout", "ko", "tko", "submission", "decision",
+}
+
+# Weather / temperature market keywords — daily high/low temp, forecasts, etc.
+_WEATHER_REQUIRED = {
+    "temperature", "temp ", "°f", "°c",
+    "daily high", "daily low", "high temp", "low temp",
+    "tc-temp", "weather", "rainfall", "precipitation",
+    "heat index", "wind speed", "snowfall", "humidity",
+    "forecast", "degrees",
 }
 
 
@@ -357,18 +362,20 @@ class PolymarketClient:
                 logger.debug("BLOCKED keyword '%s': %s", kw, text[:80])
                 return False
 
-        # Require at least one sport signal — blocks geopolitical/tech/entertainment markets
+        # Require a sports signal OR a weather signal — blocks politics/tech/entertainment
         has_game_data = bool(
             market.get("gameStartTime") or
             market.get("teams") or
             market.get("sportradarGameId") or
             market.get("sportradarEventId")
         )
-        if not has_game_data and not any(kw in text for kw in _SPORT_REQUIRED):
+        is_sport   = has_game_data or any(kw in text for kw in _SPORT_REQUIRED)
+        is_weather = any(kw in text for kw in _WEATHER_REQUIRED)
+        if not is_sport and not is_weather:
             if near:
-                logger.info("NEAR-GAME BLOCKED non-sport q=%s text=%s",
+                logger.info("NEAR-GAME BLOCKED non-sport/weather q=%s text=%s",
                             (market.get("question") or "")[:60], text[:80])
-            logger.debug("BLOCKED non-sport: %s", text[:80])
+            logger.debug("BLOCKED non-sport/weather: %s", text[:80])
             return False
         return True
 
