@@ -239,8 +239,13 @@ class PolymarketClient:
             allowed: list[dict] = []
             total_scanned = 0
             max_events = int(os.getenv("MAX_EVENTS_SCAN", "10000"))
+            # Stop after this many consecutive pages with zero new allowed markets.
+            # Avoids scanning 17k+ stale events when Polymarket.US has sparse listings.
+            _dry_page_limit = int(os.getenv("SCAN_DRY_PAGE_LIMIT", "15"))
+            _dry_pages = 0
 
             for offset in range(0, max_events, 200):
+                prev_allowed = len(allowed)
                 page_events = await _fetch_page(offset)
                 if not page_events:
                     logger.info("Scan stopped at offset %d — %d scanned, %d allowed",
@@ -264,6 +269,16 @@ class PolymarketClient:
                         total_scanned += 1
                         if self._is_allowed(row):
                             allowed.append(row)
+
+                new_this_page = len(allowed) - prev_allowed
+                if new_this_page == 0:
+                    _dry_pages += 1
+                    if _dry_pages >= _dry_page_limit:
+                        logger.info("Scan early-exit: %d consecutive dry pages — %d scanned, %d allowed",
+                                    _dry_pages, total_scanned, len(allowed))
+                        break
+                else:
+                    _dry_pages = 0
 
                 logger.info("Scan offset=%d: %d scanned, %d allowed so far",
                             offset, total_scanned, len(allowed))
