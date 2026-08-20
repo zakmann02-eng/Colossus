@@ -293,7 +293,7 @@ class PolymarketClient:
             return [], 0
 
     def _is_allowed(self, market):
-        # Helper: is this market's game within the next 7 days?
+        # Helper: is this market's game within the next 14 days?
         def _is_near_future():
             raw = market.get("gameStartTime")
             if not raw:
@@ -301,9 +301,20 @@ class PolymarketClient:
             try:
                 ts = float(raw) if isinstance(raw, (int, float)) else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
                 secs = ts - time.time()
-                return -6 * 3600 <= secs <= 7 * 86400  # live or upcoming this week
+                return -6 * 3600 <= secs <= 14 * 86400  # live or upcoming next 2 weeks
             except Exception:
                 return False
+
+        # Fast date pre-filter: reject markets whose resolution/end date is clearly in
+        # the past. Polymarket.US returns thousands of unresolved 2025-season markets
+        # as active=true — this rejects them before keyword/category checks.
+        today_utc = time.strftime("%Y-%m-%d", time.gmtime())
+        for field in ("endDate", "resolutionTime", "closeTime"):
+            val = market.get(field)
+            if val and isinstance(val, str) and len(val) >= 10:
+                if val[:10] < today_utc:
+                    return False
+                break  # at least one future date found — allow through
 
         near = _is_near_future()
 
@@ -336,7 +347,7 @@ class PolymarketClient:
                 else:
                     game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
                 now_ts = time.time()
-                if game_ts > now_ts + 7 * 86400:
+                if game_ts > now_ts + 14 * 86400:
                     logger.debug("BLOCKED far-future: %s", (market.get("question") or "")[:60])
                     return False
             except Exception:
