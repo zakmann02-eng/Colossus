@@ -776,9 +776,15 @@ class PolymarketClient:
             end_secs = end_ts - time.time()
             # Prefer game start when it's sooner than the settlement date.
             # This lets markets with endDate beyond 7 days still trade when the
-            # actual game is within the 7-day window.
+            # Prefer game start over settlement date ONLY when they're close together
+            # (< 14 days apart), indicating this is a single-game market where endDate
+            # is the settlement window after the game.
+            # For season-long markets (e.g. "EPL Champion" with startTime=next matchweek
+            # and resolutionTime=May 2027), the gap is months — use resolutionTime so
+            # they're correctly identified as far-future and filtered out.
             if game_secs is not None and game_secs < end_secs:
-                return game_secs
+                if end_secs - game_secs < 14 * 86400:
+                    return game_secs
             return end_secs
         except Exception:
             return None
