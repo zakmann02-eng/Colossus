@@ -17,6 +17,12 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com"
+
+# Per-scan block counters — reset before each scan, logged at end
+_block_counts: dict[str, int] = {}
+
+def _block(reason: str) -> None:
+    _block_counts[reason] = _block_counts.get(reason, 0) + 1
 CLOB_API  = "https://clob.polymarket.com"
 
 _BLOCKED = {
@@ -238,6 +244,7 @@ class PolymarketClient:
         try:
             allowed: list[dict] = []
             total_scanned = 0
+            _block_counts.clear()
             max_events = int(os.getenv("MAX_EVENTS_SCAN", "10000"))
             # Stop after this many consecutive pages with zero new allowed markets.
             # Must be > 32 — the catalog has ~32 pages of stale Nov-2025 markets
@@ -294,6 +301,8 @@ class PolymarketClient:
                    time.mktime(time.strptime(gst[:10], "%Y-%m-%d")) > now_ts - 86400
             ]
             upcoming_dates = sorted({m.get("gameStartTime", "")[:10] for m in upcoming if m.get("gameStartTime")})
+            block_summary = " | ".join(f"{k}={v}" for k, v in sorted(_block_counts.items(), key=lambda x: -x[1])[:10])
+            logger.info("Block summary: %s", block_summary or "none")
             logger.info("Allowed upcoming gameStartTimes: %s (count=%d)", upcoming_dates[-10:], len(upcoming))
             if upcoming:
                 for m in upcoming[:5]:
@@ -330,6 +339,7 @@ class PolymarketClient:
             val = market.get(field)
             if val and isinstance(val, str) and len(val) >= 10:
                 if val[:10] < yesterday_utc:
+                    _block("past-date")
                     return False
                 break  # date is recent enough — allow through
 
@@ -342,6 +352,7 @@ class PolymarketClient:
                     market.get("active"), market.get("closed"),
                     market.get("gameStartTime"), (market.get("question") or market.get("title") or "")[:60],
                 )
+            _block("inactive-closed")
             logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
 
@@ -354,6 +365,7 @@ class PolymarketClient:
             if near:
                 logger.info("NEAR-GAME BLOCKED eventState=%s q=%s", event_state,
                             (market.get("question") or "")[:60])
+            _block(f"eventState={event_state or 'FINAL'}")
             return False
 
         game_raw = market.get("gameStartTime")
@@ -365,6 +377,7 @@ class PolymarketClient:
                     game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
                 now_ts = time.time()
                 if game_ts > now_ts + 14 * 86400:
+                    _block("gst-far-future")
                     logger.debug("BLOCKED far-future: %s", (market.get("question") or "")[:60])
                     return False
             except Exception:
@@ -387,6 +400,7 @@ class PolymarketClient:
                 if near:
                     logger.info("NEAR-GAME BLOCKED keyword='%s' q=%s", kw,
                                 (market.get("question") or "")[:80])
+                _block(f"kw:{kw}")
                 logger.debug("BLOCKED keyword '%s': %s", kw, text[:80])
                 return False
 
@@ -403,6 +417,7 @@ class PolymarketClient:
             if near:
                 logger.info("NEAR-GAME BLOCKED non-sport/weather q=%s text=%s",
                             (market.get("question") or "")[:60], text[:80])
+            _block("non-sport-weather")
             logger.debug("BLOCKED non-sport/weather: %s", text[:80])
             return False
         return True
