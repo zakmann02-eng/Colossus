@@ -183,6 +183,7 @@ class PolymarketClient:
         allowed: list[dict] = []
         total = 0
         prev_allowed = 0
+        _first_page = True
 
         for offset in range(0, 10000, 200):
             data = await self._get(
@@ -195,14 +196,31 @@ class PolymarketClient:
                     "offset": offset,
                 },
             )
-            if not data:
+            if data is None:
+                logger.info("Markets endpoint: no response at offset=%d — endpoint may not exist or no markets", offset)
                 break
 
             items = (
                 data if isinstance(data, list)
                 else (data or {}).get("data") or (data or {}).get("markets") or []
             )
+
+            if _first_page:
+                _first_page = False
+                # Log raw structure on first page to diagnose field names
+                logger.info("Markets endpoint response type=%s, items=%d, keys=%s",
+                            type(data).__name__, len(items),
+                            list(data.keys()) if isinstance(data, dict) else "list")
+                if items:
+                    sample = items[0]
+                    logger.info("Markets endpoint sample item keys: %s", list(sample.keys())[:20])
+                    logger.info("Markets endpoint sample: q=%s endDate=%s resTime=%s active=%s slug=%s",
+                                (sample.get("question") or sample.get("title") or "")[:60],
+                                sample.get("endDate", ""), sample.get("resolutionTime", ""),
+                                sample.get("active"), sample.get("slug") or sample.get("marketSlug"))
+
             if not items:
+                logger.info("Markets endpoint: 0 items at offset=%d — done", offset)
                 break
 
             for m in items:
@@ -239,6 +257,14 @@ class PolymarketClient:
 
             if len(items) < 200:
                 break
+
+        if total == 0:
+            logger.info("Markets endpoint returned 0 items total — live game markets not found via this path")
+        else:
+            logger.info("Markets endpoint total: %d scanned, %d allowed", total, len(allowed))
+            for m in allowed[:5]:
+                logger.info("  MARKET-ALLOWED: q=%s endDate=%s slug=%s",
+                            m.get("question", "")[:60], m.get("resolutionTime", "")[:10], m.get("slug", "")[:40])
 
         return allowed, total
 
@@ -330,7 +356,16 @@ class PolymarketClient:
             _dry_page_limit = int(os.getenv("SCAN_DRY_PAGE_LIMIT", "60"))
             _dry_pages = 0
 
-            for offset in range(0, max_events, 200):
+            # Start from the last known offset where live markets appeared,
+            # with a 2-page buffer in case new markets appear before that point.
+            # On first run (or after cache miss) this is 0 and we scan everything.
+            cached_off = max(0, self._upcoming_offset - 400)
+            if cached_off > 0:
+                logger.info("Events scan starting at cached offset=%d (saves ~%.0fs)",
+                            cached_off, cached_off / 200 * 1.2)
+            _first_allowed_offset_seen = False
+
+            for offset in range(cached_off, max_events, 200):
                 prev_allowed = len(allowed)
                 page_events = await _fetch_page(offset)
                 if not page_events:
@@ -365,6 +400,12 @@ class PolymarketClient:
                         break
                 else:
                     _dry_pages = 0
+                    if not _first_allowed_offset_seen:
+                        _first_allowed_offset_seen = True
+                        if offset != self._upcoming_offset:
+                            self._upcoming_offset = offset
+                            self._save_offset_cache(offset)
+                            logger.info("Saved upcoming_offset=%d for faster future scans", offset)
 
                 logger.info("Scan offset=%d: %d scanned, %d allowed so far",
                             offset, total_scanned, len(allowed))
