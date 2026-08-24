@@ -160,20 +160,9 @@ class PolymarketClient:
     # ---------------------------------------------------------------- #
 
     async def get_sports_markets(self, limit=200):
-        # Primary: events endpoint (championship/futures markets)
-        allowed_events, total_events = await self._get_us_sdk_markets(limit)
-        logger.info("Polymarket.US SDK: %d markets scanned, %d allowed", total_events, len(allowed_events))
-
-        # Secondary: direct markets endpoint (live/near-term game markets)
-        allowed_direct, total_direct = await self._get_us_markets_direct()
-        if total_direct:
-            seen = {m.get("slug") for m in allowed_events}
-            new_markets = [m for m in allowed_direct if m.get("slug") not in seen]
-            if new_markets:
-                logger.info("Markets endpoint: %d new near-term markets added", len(new_markets))
-            allowed_events.extend(new_markets)
-
-        return allowed_events
+        allowed, total = await self._get_us_sdk_markets(limit)
+        logger.info("Polymarket.US SDK: %d markets scanned, %d allowed", total, len(allowed))
+        return allowed
 
     async def _get_us_markets_direct(self) -> tuple[list[dict], int]:
         """Scan /v1/markets for live/near-term game markets that may not appear in /v1/events."""
@@ -445,7 +434,7 @@ class PolymarketClient:
             try:
                 ts = float(raw) if isinstance(raw, (int, float)) else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
                 secs = ts - time.time()
-                return -6 * 3600 <= secs <= 14 * 86400  # live or upcoming next 14 days
+                return -6 * 3600 <= secs <= 34 * 86400  # live or upcoming next 34 days
             except Exception:
                 return False
 
@@ -495,7 +484,7 @@ class PolymarketClient:
                 else:
                     game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
                 now_ts = time.time()
-                if game_ts > now_ts + 14 * 86400:
+                if game_ts > now_ts + 34 * 86400:
                     _block("gst-far-future")
                     logger.debug("BLOCKED far-future: %s", (market.get("question") or "")[:60])
                     return False
