@@ -160,9 +160,87 @@ class PolymarketClient:
     # ---------------------------------------------------------------- #
 
     async def get_sports_markets(self, limit=200):
-        allowed, total = await self._get_us_sdk_markets(limit)
-        logger.info("Polymarket.US SDK: %d markets scanned, %d allowed", total, len(allowed))
-        return allowed
+        # Primary: events endpoint (championship/futures markets)
+        allowed_events, total_events = await self._get_us_sdk_markets(limit)
+        logger.info("Polymarket.US SDK: %d markets scanned, %d allowed", total_events, len(allowed_events))
+
+        # Secondary: direct markets endpoint (live/near-term game markets)
+        allowed_direct, total_direct = await self._get_us_markets_direct()
+        if total_direct:
+            seen = {m.get("slug") for m in allowed_events}
+            new_markets = [m for m in allowed_direct if m.get("slug") not in seen]
+            if new_markets:
+                logger.info("Markets endpoint: %d new near-term markets added", len(new_markets))
+            allowed_events.extend(new_markets)
+
+        return allowed_events
+
+    async def _get_us_markets_direct(self) -> tuple[list[dict], int]:
+        """Scan /v1/markets for live/near-term game markets that may not appear in /v1/events."""
+        today_str = time.strftime("%Y-%m-%d", time.gmtime())
+        week_str  = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 7 * 86400))
+
+        allowed: list[dict] = []
+        total = 0
+        prev_allowed = 0
+
+        for offset in range(0, 10000, 200):
+            data = await self._get(
+                "https://gateway.polymarket.us/v1/markets",
+                params={
+                    "limit": 200,
+                    "active": "true",
+                    "end_date_min": today_str,
+                    "end_date_max": week_str,
+                    "offset": offset,
+                },
+            )
+            if not data:
+                break
+
+            items = (
+                data if isinstance(data, list)
+                else (data or {}).get("data") or (data or {}).get("markets") or []
+            )
+            if not items:
+                break
+
+            for m in items:
+                total += 1
+                row: dict = {}
+                for k in (
+                    "id", "conditionId", "question", "title", "slug", "marketSlug",
+                    "eventSlug", "active", "closed", "eventState",
+                    "gameStartTime", "startTime", "startDate",
+                    "resolutionTime", "closeTime", "endDate",
+                    "volume", "volume24hr", "volume24Hour", "daysAgo",
+                    "outcomePrices", "marketSides", "clobTokenIds", "tokens",
+                    "outcomes", "category", "tags",
+                ):
+                    v = m.get(k)
+                    if v is not None:
+                        row[k] = v
+                row["question"]   = m.get("question") or m.get("title") or ""
+                row["slug"]       = m.get("slug") or m.get("marketSlug") or ""
+                row["eventSlug"]  = m.get("eventSlug") or row["slug"]
+                row["active"]     = m.get("active", True)
+                row["closed"]     = m.get("closed", False)
+                row["resolutionTime"] = (
+                    m.get("resolutionTime") or m.get("closeTime") or
+                    m.get("endDate") or ""
+                )
+                if self._is_allowed(row):
+                    allowed.append(row)
+
+            new_this_page = len(allowed) - prev_allowed
+            logger.info("Markets scan offset=%d: %d scanned, %d allowed (%d new)",
+                        offset, total, len(allowed), new_this_page)
+            prev_allowed = len(allowed)
+
+            if len(items) < 200:
+                break
+
+        return allowed, total
 
     async def _get_us_sdk_markets(self, limit=200) -> tuple[list[dict], int]:
         """Stream-filter markets page by page.
