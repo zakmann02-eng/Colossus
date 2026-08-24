@@ -326,7 +326,7 @@ class PolymarketClient:
             try:
                 ts = float(raw) if isinstance(raw, (int, float)) else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
                 secs = ts - time.time()
-                return -6 * 3600 <= secs <= 14 * 86400  # live or upcoming next 2 weeks
+                return -6 * 3600 <= secs <= 45 * 86400  # live or upcoming next 45 days
             except Exception:
                 return False
 
@@ -376,7 +376,7 @@ class PolymarketClient:
                 else:
                     game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
                 now_ts = time.time()
-                if game_ts > now_ts + 14 * 86400:
+                if game_ts > now_ts + 45 * 86400:
                     _block("gst-far-future")
                     logger.debug("BLOCKED far-future: %s", (market.get("question") or "")[:60])
                     return False

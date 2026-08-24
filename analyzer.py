@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 MIN_PRICE    = 0.05
 MAX_PRICE    = 0.95
 MIN_VOL_24H  = 0.0   # API does not return volume24hr — gate disabled
-MAX_DAYS_OUT = 14 * 86_400  # live games + next 2 weeks — no far-future markets
+MAX_DAYS_OUT = 45 * 86_400  # up to 45 days: covers MLB/MLS playoff-winner markets
 MIN_TRIGGERS = 2  # any 2 of T1/T2/T3/T5; T5 counts double when present
 
 _skip_log_count = 0  # log first N skips at INFO so Railway shows why
