@@ -162,6 +162,92 @@ class PolymarketClient:
     async def get_sports_markets(self, limit=200):
         allowed, total = await self._get_us_sdk_markets(limit)
         logger.info("Polymarket.US SDK: %d markets scanned, %d allowed", total, len(allowed))
+        # Supplemental live-game scan: no active=True filter, tight today-only date window.
+        # Surfaces in-progress games that flip to active=False once underway.
+        live_markets = await self._get_live_game_markets()
+        if live_markets:
+            seen_ids = {m.get("id") or m.get("conditionId") or m.get("slug") for m in allowed}
+            new_live = [m for m in live_markets
+                        if (m.get("id") or m.get("conditionId") or m.get("slug")) not in seen_ids]
+            if new_live:
+                logger.info("Live-game scan added %d new market(s) not in main scan", len(new_live))
+                allowed.extend(new_live)
+        return allowed
+
+    async def _get_live_game_markets(self) -> list[dict]:
+        """Scan today's events WITHOUT active=True to capture live in-progress games."""
+        if not self._us_client:
+            return []
+        loop = asyncio.get_event_loop()
+        today_str    = time.strftime("%Y-%m-%d", time.gmtime())
+        tomorrow_str = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 86400))
+
+        _KEEP = (
+            "id", "conditionId", "question", "title",
+            "slug", "marketSlug", "eventSlug",
+            "active", "closed", "eventState",
+            "gameStartTime", "startTime", "startDate",
+            "resolutionTime", "closeTime", "closedTime", "endDate",
+            "volume", "volumeNum", "volume24hr", "volume24Hour", "daysAgo",
+            "teams", "sportradarGameId", "sportradarEventId",
+            "category", "tags",
+            "outcomes", "outcomePrices", "marketSides", "clobTokenIds", "tokens",
+        )
+
+        def _extract(data):
+            return (
+                data if isinstance(data, list)
+                else (data or {}).get("data") or (data or {}).get("events") or []
+            ) if data else []
+
+        allowed: list[dict] = []
+        total = 0
+        try:
+            for offset in range(0, 2000, 200):
+                data = await loop.run_in_executor(
+                    None,
+                    lambda o=offset: self._us_client.events.list({
+                        "limit": 200,
+                        "end_date_min": today_str,
+                        "end_date_max": tomorrow_str,
+                        "offset": o,
+                    }),
+                )
+                events = _extract(data)
+                if not events:
+                    break
+                for event in events:
+                    event_slug = event.get("slug") or event.get("eventSlug") or ""
+                    sub = event.get("markets") or []
+                    items = sub if sub else [event]
+                    for m in items:
+                        row: dict = {}
+                        for k in _KEEP:
+                            v = m.get(k)
+                            if v is None:
+                                v = event.get(k)
+                            if v is not None:
+                                row[k] = v
+                        row["active"]         = event.get("active", m.get("active", True))
+                        row["closed"]         = False
+                        row["slug"]           = m.get("slug") or event_slug
+                        row["eventSlug"]      = event_slug
+                        row["question"]       = m.get("question") or m.get("title") or event.get("title") or ""
+                        row["volume24hr"]     = event.get("volume24hr") or m.get("volume24hr") or 0
+                        row["resolutionTime"] = (
+                            m.get("resolutionTime") or m.get("closeTime") or m.get("closedTime") or
+                            event.get("resolutionTime") or event.get("endDate") or m.get("endDate") or ""
+                        )
+                        row["eventState"]     = event.get("eventState") or ""
+                        total += 1
+                        if self._is_allowed(row):
+                            allowed.append(row)
+                if len(events) < 200:
+                    break
+        except Exception as exc:
+            logger.debug("Live-game scan error: %s", exc)
+        if total:
+            logger.info("Live-game scan: %d scanned, %d allowed (today=%s)", total, len(allowed), today_str)
         return allowed
 
     async def _get_us_markets_direct(self) -> tuple[list[dict], int]:
@@ -453,16 +539,24 @@ class PolymarketClient:
 
         near = _is_near_future()
 
-        if not market.get("active", True) or market.get("closed", False):
-            if near:
-                logger.info(
-                    "NEAR-GAME BLOCKED active/closed: active=%s closed=%s gameStartTime=%s q=%s",
-                    market.get("active"), market.get("closed"),
-                    market.get("gameStartTime"), (market.get("question") or market.get("title") or "")[:60],
-                )
+        if market.get("closed", False):
             _block("inactive-closed")
-            logger.debug("BLOCKED active/closed: %s", (market.get("question") or market.get("title") or "")[:60])
+            logger.debug("BLOCKED closed: %s", (market.get("question") or market.get("title") or "")[:60])
             return False
+        if not market.get("active", True):
+            # Allow if end date is today or later — market may be live in-progress
+            end_val = (market.get("endDate") or market.get("resolutionTime") or
+                       market.get("closeTime") or "")
+            today_str_local = time.strftime("%Y-%m-%d", time.gmtime())
+            if not (end_val and isinstance(end_val, str) and end_val[:10] >= today_str_local):
+                _block("inactive-closed")
+                logger.debug("BLOCKED inactive (old): %s", (market.get("question") or "")[:60])
+                return False
+            logger.info(
+                "ACTIVE=False allowed (live?): active=%s endDate=%s gameStartTime=%s q=%s",
+                market.get("active"), end_val[:10],
+                market.get("gameStartTime"), (market.get("question") or market.get("title") or "")[:60],
+            )
 
         event_state_raw = market.get("eventState")
         if event_state_raw and not isinstance(event_state_raw, str):
