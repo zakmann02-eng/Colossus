@@ -155,7 +155,9 @@ async def evaluate_market(market: dict, client: "PolymarketClient") -> TradeSign
     # Past games and far-future markets go to debug — they're expected and burn INFO quota
     # Allow a 6-hour live window: game may have started but market is still open for in-play trading.
     LIVE_WINDOW = -6 * 3600
-    is_live = LIVE_WINDOW <= secs <= 0 and market.get("active", True) and not market.get("closed", False)
+    # Do NOT gate on active=True — in-progress games flip to active=False in the API
+    # but remain fully tradeable (CLOB still open). Only hard-block on closed=True.
+    is_live = LIVE_WINDOW <= secs <= 0 and not market.get("closed", False)
     if secs <= 0 and not is_live:
         _skip("past")
         logger.debug("SKIP past(%.1fd): %s", secs / 86400, question[:60])
