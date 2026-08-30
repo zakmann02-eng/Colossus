@@ -48,10 +48,13 @@ _BLOCKED = {
     "first period", "second period", "third period",
     # Player props — individual stat lines, not game outcomes
     "rushing yards", "passing yards", "receiving yards",
+    "total yards", "passing tds", "receiving tds", "rushing tds",
+    "total tackles", "sacks ", "interceptions",
     "total rebounds", "total assists",
     "strikeouts", "home runs", "hits and runs",
     "anytime scorer", "first scorer", "last scorer",
     "to score 2+", "to score 3+", "to record",
+    "to throw for", "to rush for",
     # Over/under totals — block decimal line markets (e.g. "Under 2.5", "Over 1.5 goals", "O/U 3.5")
     "over 0.", "over 1.", "over 2.", "over 3.", "over 4.", "over 5.",
     "under 0.", "under 1.", "under 2.", "under 3.", "under 4.", "under 5.",
@@ -73,6 +76,7 @@ _SPORT_REQUIRED = {
     "tournament", "championship", "playoff", "series",
     # Sports by name
     "soccer", "football", "nfl", "nba", "nhl", "mlb",
+    "ncaa", "cfb", "ncaaf", "college football",
     "ufc", "mma", "boxing", "wrestling",
     "tennis", "golf", "f1", "formula 1", "indycar",
     "rugby", "cricket", "hockey", "baseball", "basketball",

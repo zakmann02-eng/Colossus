@@ -104,8 +104,15 @@ _SPORT_KEYWORDS: dict[str, list[str]] = {
     "baseball":   ["mlb", "baseball", "world series", "mlb playoffs",
                    "alcs", "nlcs", "alds", "nlds"],
     "hockey":     ["nhl", "hockey", "ice hockey", "stanley cup"],
-    "football":   ["nfl", "ncaaf", "super bowl", "american football",
-                   "nfl draft", "college football", "nfl playoffs",
+    # College football — must come before "football" so NCAAF markets use NCAAF odds
+    "ncaaf":      ["ncaa football", "ncaaf", "cfb", "college football",
+                   "college football playoff", "cfp", "cfp national championship",
+                   "bowl game", "rose bowl", "sugar bowl", "orange bowl",
+                   "cotton bowl", "fiesta bowl", "peach bowl", "alamo bowl",
+                   "sec championship", "big ten championship", "acc championship",
+                   "big 12 championship", "pac-12 championship"],
+    "football":   ["nfl", "super bowl", "american football",
+                   "nfl draft", "nfl playoffs",
                    "nfc championship", "afc championship"],
     # ── Other sports ──────────────────────────────────────────────────────────
     "golf":       ["pga", "golf", "masters", "open championship", "us open golf",
@@ -138,6 +145,11 @@ _TOP_PLAYERS: dict[str, list[str]] = {
     "icehockey_nhl": [
         "connor mcdavid", "leon draisaitl", "david pastrnak", "auston matthews",
         "nathan mackinnon", "alex ovechkin", "sidney crosby", "nikita kucherov",
+    ],
+    "americanfootball_ncaaf": [
+        "travis hunter", "dillon gabriel", "shedeur sanders", "ashton jeanty",
+        "tavien st. clair", "dj lagway", "conner weigman", "quinn ewers",
+        "nico iamaleava", "drew allar",
     ],
     "soccer_fifa_world_cup": [
         "messi", "ronaldo", "mbappe", "haaland", "vinicius", "harry kane",
