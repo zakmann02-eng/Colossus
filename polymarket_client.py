@@ -131,11 +131,21 @@ class PolymarketClient:
 
     def _load_offset_cache(self) -> int:
         try:
-            import json, pathlib
+            import json, pathlib, time as _time
             p = pathlib.Path(self._OFFSET_CACHE_FILE)
             if p.exists():
-                val = json.loads(p.read_text()).get("upcoming_offset", 0)
-                logger.info("Loaded cached upcoming_offset=%d", val)
+                data = json.loads(p.read_text())
+                val = data.get("upcoming_offset", 0)
+                saved_date = data.get("saved_date", "")
+                today = _time.strftime("%Y-%m-%d", _time.gmtime())
+                # Reset weekly — catalog structure shifts as new seasons begin
+                saved_week = saved_date[:8] if saved_date else ""
+                current_week = today[:8]
+                if saved_week and saved_week != current_week:
+                    logger.info("Offset cache stale (saved %s, today %s) — resetting to 0 for full scan",
+                                saved_date, today)
+                    return 0
+                logger.info("Loaded cached upcoming_offset=%d (saved %s)", val, saved_date)
                 return int(val)
         except Exception:
             pass
@@ -143,12 +153,14 @@ class PolymarketClient:
 
     def _save_offset_cache(self, offset: int) -> None:
         try:
-            import json, pathlib
+            import json, pathlib, time as _time
+            today = _time.strftime("%Y-%m-%d", _time.gmtime())
             pathlib.Path(self._OFFSET_CACHE_FILE).write_text(
-                json.dumps({"upcoming_offset": offset})
+                json.dumps({"upcoming_offset": offset, "saved_date": today})
             )
         except Exception:
             pass
+
 
     async def _get(self, url, params=None):
         try:
@@ -184,7 +196,8 @@ class PolymarketClient:
             return []
         loop = asyncio.get_event_loop()
         today_str    = time.strftime("%Y-%m-%d", time.gmtime())
-        tomorrow_str = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 86400))
+        # 7-day window: catches tonight's games (UTC end dates vary) and this week's schedule
+        week_str     = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 7 * 86400))
 
         _KEEP = (
             "id", "conditionId", "question", "title",
@@ -207,13 +220,13 @@ class PolymarketClient:
         allowed: list[dict] = []
         total = 0
         try:
-            for offset in range(0, 2000, 200):
+            for offset in range(0, 5000, 200):
                 data = await loop.run_in_executor(
                     None,
                     lambda o=offset: self._us_client.events.list({
                         "limit": 200,
                         "end_date_min": today_str,
-                        "end_date_max": tomorrow_str,
+                        "end_date_max": week_str,
                         "offset": o,
                     }),
                 )
