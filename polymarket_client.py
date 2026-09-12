@@ -59,6 +59,14 @@ _BLOCKED = {
     "over 0.", "over 1.", "over 2.", "over 3.", "over 4.", "over 5.",
     "under 0.", "under 1.", "under 2.", "under 3.", "under 4.", "under 5.",
     "o/u", " ou ", "total goals", "total runs", "total sets", "total games",
+    # Season-long / championship futures — trade individual games only
+    "to win the al", "to win the nl", "to win the world series",
+    "to win the nfc", "to win the afc", "to win the super bowl",
+    "to win the nba", "to win the nhl", "to win the stanley cup",
+    "to win the cfp", "to win the national championship",
+    "al champion", "nl champion", "al pennant", "nl pennant",
+    "make the playoffs", "reach the playoffs", "win the division",
+    "regular season wins", "season wins",
     # Award / multi-outcome markets — no binary YES/NO CLOB pricing
     "mvp", "most valuable", "award", "golden boot", "ballon d'or",
     # Exact score markets — specific scoreline props, not binary outcomes
@@ -537,7 +545,7 @@ class PolymarketClient:
             try:
                 ts = float(raw) if isinstance(raw, (int, float)) else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
                 secs = ts - time.time()
-                return -6 * 3600 <= secs <= 34 * 86400  # live or upcoming next 34 days
+                return -6 * 3600 <= secs <= 14 * 86400  # live or upcoming next 14 days
             except Exception:
                 return False
 
@@ -595,7 +603,7 @@ class PolymarketClient:
                 else:
                     game_ts = datetime.fromisoformat(str(game_raw).replace("Z", "+00:00")).timestamp()
                 now_ts = time.time()
-                if game_ts > now_ts + 34 * 86400:
+                if game_ts > now_ts + 14 * 86400:
                     _block("gst-far-future")
                     logger.debug("BLOCKED far-future: %s", (market.get("question") or "")[:60])
                     return False
