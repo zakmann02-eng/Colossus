@@ -60,24 +60,22 @@ _BLOCKED = {
     "under 0.", "under 1.", "under 2.", "under 3.", "under 4.", "under 5.",
     "o/u", " ou ", "total goals", "total runs", "total sets", "total games",
     # Season-long / championship futures — trade individual games only.
-    # Polymarket titles "Will [Team] win the World Series?" → "win the world series" (no "to").
-    # Also block postseason series betting (ALCS, NLCS, etc.) — trade game moneylines only.
-    "win the world series", "world series champion", "world series winner",
-    "win the al pennant", "win the nl pennant",
-    "win the alcs", "win the nlcs", "win the alds", "win the nlds",
-    "al pennant", "nl pennant", "alcs", "nlcs", "alds", "nlds",
-    "win the super bowl", "super bowl champion", "super bowl winner",
-    "win the nfc", "win the afc",
-    "nfc championship game", "afc championship game",
-    "win the nba championship", "nba champion", "nba title",
-    "win the stanley cup", "stanley cup champion", "stanley cup winner",
-    "win the cfp", "cfp championship", "national championship game",
+    # Block the championship name directly: year insertions ("2026 World Series")
+    # defeat phrase-matching, so block the core noun. Safe until each series starts.
+    "world series",
+    "super bowl",
+    "stanley cup",
+    "nba finals",
+    "cfp championship", "national championship game",
     "win the national championship",
+    "al pennant", "nl pennant",
+    "alcs", "nlcs", "alds", "nlds",
+    "nfc championship", "afc championship",
     "make the playoffs", "reach the playoffs", "win the division",
     "regular season wins", "season wins",
-    "to win the al", "to win the nl", "to win the world series",
-    "to win the nfc", "to win the afc", "to win the super bowl",
-    "to win the nba", "to win the nhl", "to win the stanley cup",
+    "to win the al", "to win the nl",
+    "to win the nfc", "to win the afc",
+    "to win the nba", "to win the nhl",
     "to win the cfp",
     # Award / multi-outcome markets — no binary YES/NO CLOB pricing
     "mvp", "most valuable", "award", "golden boot", "ballon d'or",
@@ -108,7 +106,6 @@ _SPORT_REQUIRED = {
     "world cup", "champions league", "europa league", "premier league",
     "la liga", "serie a", "bundesliga", "ligue 1", "mls",
     "copa america", "grand slam", "wimbledon", "french open", "australian open",
-    "super bowl", "world series", "stanley cup", "nba finals",
     "grand prix", "open championship",
     "gold cup", "nations league",
     # Sport-specific outcome terms
