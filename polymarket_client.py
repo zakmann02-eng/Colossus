@@ -85,6 +85,9 @@ _SPORT_REQUIRED = {
     # Sports by name
     "soccer", "football", "nfl", "nba", "nhl", "mlb",
     "ncaa", "cfb", "ncaaf", "college football",
+    "sec ", "big ten", "big 12", "acc ", "pac-12", "pac 12",
+    "hawkeyes", "buckeyes", "crimson tide", "longhorns", "bulldogs",
+    "sooners", "wolverines", "fighting irish", "seminoles", "tar heels",
     "ufc", "mma", "boxing", "wrestling",
     "tennis", "golf", "f1", "formula 1", "indycar",
     "rugby", "cricket", "hockey", "baseball", "basketball",
@@ -145,14 +148,18 @@ class PolymarketClient:
                 data = json.loads(p.read_text())
                 val = data.get("upcoming_offset", 0)
                 saved_date = data.get("saved_date", "")
-                today = _time.strftime("%Y-%m-%d", _time.gmtime())
-                # Reset weekly — catalog structure shifts as new seasons begin
-                saved_week = saved_date[:8] if saved_date else ""
-                current_week = today[:8]
-                if saved_week and saved_week != current_week:
-                    logger.info("Offset cache stale (saved %s, today %s) — resetting to 0 for full scan",
-                                saved_date, today)
-                    return 0
+                if saved_date:
+                    now_ts = _time.time()
+                    try:
+                        import calendar
+                        saved_ts = calendar.timegm(_time.strptime(saved_date, "%Y-%m-%d"))
+                        age_days = (now_ts - saved_ts) / 86400
+                        if age_days > 3:
+                            logger.info("Offset cache too old (%.0fd, saved %s) — resetting for full scan",
+                                        age_days, saved_date)
+                            return 0
+                    except Exception:
+                        return 0
                 logger.info("Loaded cached upcoming_offset=%d (saved %s)", val, saved_date)
                 return int(val)
         except Exception:
