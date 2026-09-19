@@ -70,6 +70,9 @@ _BLOCKED = {
     "win the national championship",
     "al pennant", "nl pennant",
     "alcs", "nlcs", "alds", "nlds",
+    # League champion futures ("National League Champion", "American League Champion")
+    "national league champion", "american league champion",
+    "league champion",
     "nfc championship", "afc championship",
     "make the playoffs", "reach the playoffs", "win the division",
     "regular season wins", "season wins",
@@ -257,8 +260,15 @@ class PolymarketClient:
                 events = _extract(data)
                 if not events:
                     break
+                diag_sample: list[str] = []  # log first few events for diagnosis
                 for event in events:
                     event_slug = event.get("slug") or event.get("eventSlug") or ""
+                    if total < 5:  # log first 5 raw events to diagnose filtering
+                        diag_sample.append(
+                            f"slug={event_slug[:30]} active={event.get('active')} "
+                            f"endDate={event.get('endDate','?')[:10]} "
+                            f"title={str(event.get('title') or event.get('question') or '')[:40]}"
+                        )
                     sub = event.get("markets") or []
                     items = sub if sub else [event]
                     for m in items:
@@ -283,12 +293,18 @@ class PolymarketClient:
                         total += 1
                         if self._is_allowed(row):
                             allowed.append(row)
+                if offset == 0 and diag_sample:
+                    for s in diag_sample:
+                        logger.info("LIVE-SCAN-DIAG: %s", s)
                 if len(events) < 200:
                     break
         except Exception as exc:
-            logger.debug("Live-game scan error: %s", exc)
+            logger.warning("Live-game scan error: %s", exc)
         if total:
-            logger.info("Live-game scan: %d scanned, %d allowed (today=%s)", total, len(allowed), today_str)
+            logger.info("Live-game scan: %d scanned, %d allowed (today=%s to %s)", total, len(allowed), today_str, week_str)
+            logger.info("Live-scan block summary: %s",
+                        " | ".join(f"{k}={v}" for k, v in sorted(_block_counts.items(), key=lambda x: -x[1])[:10])
+                        if _block_counts else "none")
         return allowed
 
     async def _get_us_markets_direct(self) -> tuple[list[dict], int]:
