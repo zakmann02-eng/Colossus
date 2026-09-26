@@ -99,8 +99,21 @@ _SPORT_REQUIRED = {
     "soccer", "football", "nfl", "nba", "nhl", "mlb",
     "ncaa", "cfb", "ncaaf", "college football",
     "sec ", "big ten", "big 12", "acc ", "pac-12", "pac 12",
+    # CFB team nicknames (already in)
     "hawkeyes", "buckeyes", "crimson tide", "longhorns", "bulldogs",
     "sooners", "wolverines", "fighting irish", "seminoles", "tar heels",
+    # CFB school names — appear in Polymarket market titles
+    "alabama", "georgia", "ohio state", "michigan", "clemson",
+    "notre dame", "penn state", "florida", "lsu", "auburn",
+    "oklahoma", "oregon", "washington", "usc trojans", "ucla",
+    "texas a&m", "tennessee", "miami hurricanes", "north carolina",
+    "virginia tech", "iowa", "nebraska",
+    "boise state", "utah utes", "colorado buffaloes", "arkansas",
+    "ole miss", "mississippi state", "kentucky wildcats",
+    "northwestern", "purdue", "indiana hoosiers", "illinois fighting",
+    "wisconsin badgers", "minnesota gophers", "rutgers",
+    "air force", "army black", "navy midshipmen",
+    "appalachian state", "byu cougars", "tulane green",
     "ufc", "mma", "boxing", "wrestling",
     "tennis", "golf", "f1", "formula 1", "indycar",
     "rugby", "cricket", "hockey", "baseball", "basketball",
@@ -246,6 +259,9 @@ class PolymarketClient:
 
         allowed: list[dict] = []
         total = 0
+        # Snapshot _block_counts before this scan to compute supplemental-only delta
+        _pre_scan_counts = dict(_block_counts)
+
         try:
             for offset in range(0, 5000, 200):
                 data = await loop.run_in_executor(
@@ -279,20 +295,37 @@ class PolymarketClient:
                                 v = event.get(k)
                             if v is not None:
                                 row[k] = v
-                        row["active"]         = event.get("active", m.get("active", True))
+                        # API already filtered end_date_min=today, so trust the date filter.
+                        # Forcing active=True avoids false inactive-closed blocks for in-progress games.
+                        row["active"]         = True
                         row["closed"]         = False
                         row["slug"]           = m.get("slug") or event_slug
                         row["eventSlug"]      = event_slug
                         row["question"]       = m.get("question") or m.get("title") or event.get("title") or ""
                         row["volume24hr"]     = event.get("volume24hr") or m.get("volume24hr") or 0
+                        # Populate endDate so _is_allowed's past-date check has a value
+                        end_date = (event.get("endDate") or m.get("endDate") or "")
+                        if end_date:
+                            row["endDate"] = end_date
                         row["resolutionTime"] = (
                             m.get("resolutionTime") or m.get("closeTime") or m.get("closedTime") or
-                            event.get("resolutionTime") or event.get("endDate") or m.get("endDate") or ""
+                            event.get("resolutionTime") or end_date or ""
                         )
                         row["eventState"]     = event.get("eventState") or ""
                         total += 1
+                        before = len(allowed)
                         if self._is_allowed(row):
                             allowed.append(row)
+                        elif total <= 10:
+                            # Log why the first 10 markets were blocked
+                            q = row.get("question", "")[:60]
+                            reason = next(
+                                (f"kw:{kw}" for kw in _BLOCKED if kw in (q + " " + row.get("slug", "")).lower()),
+                                "non-sport-weather" if not any(kw in (q + " " + str(row.get("category",""))).lower() for kw in _SPORT_REQUIRED) else "other"
+                            )
+                            logger.info("LIVE-SKIP[%d]: %s | reason≈%s active=%s endDate=%s",
+                                        total, q[:50], reason,
+                                        event.get("active"), (end_date or "?")[:10])
                 if offset == 0 and diag_sample:
                     for s in diag_sample:
                         logger.info("LIVE-SCAN-DIAG: %s", s)
@@ -302,9 +335,12 @@ class PolymarketClient:
             logger.warning("Live-game scan error: %s", exc)
         if total:
             logger.info("Live-game scan: %d scanned, %d allowed (today=%s to %s)", total, len(allowed), today_str, week_str)
-            logger.info("Live-scan block summary: %s",
-                        " | ".join(f"{k}={v}" for k, v in sorted(_block_counts.items(), key=lambda x: -x[1])[:10])
-                        if _block_counts else "none")
+            # Compute delta: what this supplemental scan blocked (not the main scan)
+            supp_blocks = {k: _block_counts.get(k, 0) - _pre_scan_counts.get(k, 0)
+                           for k in _block_counts if _block_counts.get(k, 0) > _pre_scan_counts.get(k, 0)}
+            logger.info("Live-scan block delta: %s",
+                        " | ".join(f"{k}={v}" for k, v in sorted(supp_blocks.items(), key=lambda x: -x[1])[:10])
+                        if supp_blocks else "none")
         return allowed
 
     async def _get_us_markets_direct(self) -> tuple[list[dict], int]:
