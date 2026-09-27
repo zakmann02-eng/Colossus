@@ -70,8 +70,8 @@ TELEGRAM_CHAT   = int(_require("TELEGRAM_CHAT_ID"))
 POLY_KEY_ID     = _require("POLYMARKET_KEY_ID")
 POLY_SECRET_KEY = _require("POLYMARKET_SECRET_KEY")
 
-MIN_TRADE_USD = float(os.getenv("MIN_TRADE_USD",   "0.10"))
-MAX_TRADE_USD = float(os.getenv("MAX_TRADE_USD",   "1.00"))
+MIN_TRADE_USD = float(os.getenv("MIN_TRADE_USD",   "1.00"))
+MAX_TRADE_USD = float(os.getenv("MAX_TRADE_USD",   "3.00"))
 TP_PCT        = float(os.getenv("TAKE_PROFIT_PCT", "20.0")) / 100
 SL_PCT        = float(os.getenv("STOP_LOSS_PCT",   "8.0"))  / 100
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL",     "60"))

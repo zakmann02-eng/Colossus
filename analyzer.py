@@ -19,9 +19,9 @@ Requires 2+ effective triggers to fire a trade:
   T1/T2/T3 can also fire a trade with any 2 of them.
 
 Position sizing by effective triggers fired:
-  2 triggers → LOW  → $0.20–$0.35 · TP 15% · SL 6%
-  3 triggers → MED  → $0.35–$0.65 · TP 20% · SL 8%
-  4+ triggers→ HIGH → $0.65–$1.00 · TP 25% · SL 10%
+  2 triggers → LOW  → $1.00–$1.50 · TP 15% · SL 6%
+  3 triggers → MED  → $1.50–$2.25 · TP 20% · SL 8%
+  4+ triggers→ HIGH → $2.25–$3.00 · TP 25% · SL 10%
 """
 
 from __future__ import annotations
@@ -81,9 +81,9 @@ T3_MULT = 2.0
 T5_MIN_EDGE = 0.03
 
 _TIERS = {
-    2: {"label": "LOW",  "min_usd": 0.20, "max_usd": 0.35, "tp": 0.15, "sl": 0.06},
-    3: {"label": "MED",  "min_usd": 0.35, "max_usd": 0.65, "tp": 0.20, "sl": 0.08},
-    4: {"label": "HIGH", "min_usd": 0.65, "max_usd": 1.00, "tp": 0.25, "sl": 0.10},
+    2: {"label": "LOW",  "min_usd": 1.00, "max_usd": 1.50, "tp": 0.15, "sl": 0.06},
+    3: {"label": "MED",  "min_usd": 1.50, "max_usd": 2.25, "tp": 0.20, "sl": 0.08},
+    4: {"label": "HIGH", "min_usd": 2.25, "max_usd": 3.00, "tp": 0.25, "sl": 0.10},
 }
 
 
